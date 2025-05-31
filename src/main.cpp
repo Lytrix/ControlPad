@@ -487,38 +487,38 @@ public:
     // Override the specific button with bright target color
     if (buttonNumber == 1) {
       cmd2[24] = r; cmd2[25] = g; cmd2[26] = b;  // Button 1
-    } else if (buttonNumber == 2) {
-      cmd2[39] = r; cmd2[40] = g; cmd2[41] = b;  // Button 2
-    } else if (buttonNumber == 3) {
-      cmd2[54] = r; cmd2[55] = g; cmd2[56] = b;  // Button 3
     } else if (buttonNumber == 6) {
       cmd2[27] = r; cmd2[28] = g; cmd2[29] = b;  // Button 6
-    } else if (buttonNumber == 7) {
-      cmd2[42] = r; cmd2[43] = g; cmd2[44] = b;  // Button 7
-    } else if (buttonNumber == 8) {
-      cmd2[57] = r; cmd2[58] = g; cmd2[59] = b;  // Button 8
     } else if (buttonNumber == 11) {
-      cmd2[30] = r; cmd2[31] = g; cmd2[32] = b;  // Button 11
-    } else if (buttonNumber == 12) {
-      cmd2[45] = r; cmd2[46] = g; cmd2[47] = b;  // Button 12
-    } else if (buttonNumber == 13) {
-      cmd2[60] = r; cmd2[61] = g; cmd2[62] = b;  // Button 13
+      cmd2[30] = r; cmd2[31] = g; cmd2[32] = b;  // Button 11   
     } else if (buttonNumber == 16) {
       cmd2[33] = r; cmd2[34] = g; cmd2[35] = b;  // Button 16
-    } else if (buttonNumber == 17) {
-      cmd2[48] = r; cmd2[49] = g; cmd2[50] = b;  // Button 17
-    } else if (buttonNumber == 18) {
-      cmd2[63] = r;  // Button 18 R component (continues in cmd3)
     } else if (buttonNumber == 21) {
       cmd2[36] = r; cmd2[37] = g; cmd2[38] = b;  // Button 21
-    } else if (buttonNumber == 22) {
+    } else if (buttonNumber == 2) {
+      cmd2[39] = r; cmd2[40] = g; cmd2[41] = b;  // Button 2
+    } else if (buttonNumber == 7) {
+      cmd2[42] = r; cmd2[43] = g; cmd2[44] = b;  // Button 7
+    } else if (buttonNumber == 12) {
+      cmd2[45] = r; cmd2[46] = g; cmd2[47] = b;  // Button 12
+    } else if (buttonNumber == 17) {
+      cmd2[48] = r; cmd2[49] = g; cmd2[50] = b;  // Button 17
+     } else if (buttonNumber == 22) {
       cmd2[51] = r; cmd2[52] = g; cmd2[53] = b;  // Button 22
+    } else if (buttonNumber == 3) {
+      cmd2[54] = r; cmd2[55] = g; cmd2[56] = b;  // Button 3
+    } else if (buttonNumber == 8) {
+      cmd2[57] = r; cmd2[58] = g; cmd2[59] = b;  // Button 8
+  } else if (buttonNumber == 13) {
+      cmd2[60] = r; cmd2[61] = g; cmd2[62] = b;  // Button 13
+    } else if (buttonNumber == 18) {
+      cmd2[63] = r;  // Button 18 R component (continues in cmd3)
     }
     
     // Command 3: Complete remaining LED state from working capture
     uint8_t cmd3[64] = {
-      0x56, 0x83, 0x01, 0x00, 
-      0x98, 0x99,              // Button 18 GB (positions 4-5) - continues from cmd2 R
+      0x56, 0x83, 0x01,
+      0x00, 0x98, 0x99,        // Button 18 GB (positions 4-5) - continues from cmd2 R
       0x97, 0x98, 0x99,        // Button 23 (positions 6-8)
       0x65, 0x66, 0x67,        // Button 4 (positions 9-11)
       0x65, 0x66, 0x67,        // Button 9 (positions 12-14)
@@ -1023,10 +1023,9 @@ public:
         }
         Serial.println();
         
-        // Trigger LED response for ALL 25 key presses
+        // Process button mapping immediately in kbd_poll (most reliable)
         if (controlPadDriver) {
-          // Test the EXACT pattern from USB capture
-          Serial.printf("🔥 KEY PRESSED: 0x%02X - Testing EXACT LED pattern!\n", kbd_report[2]);
+          Serial.printf("🔥 KEY PRESSED: 0x%02X - Processing in kbd_poll\n", kbd_report[2]);
           
           // Map HID codes to button numbers based on breakdown file
           uint8_t buttonNumber = 0;
@@ -1034,19 +1033,18 @@ public:
           
           switch(kbd_report[2]) {
             // Row 1: Buttons 1-5
-            case 0x1E: 
-              buttonNumber = 1; r = 255; g = 0; b = 0; break;     // Button 1: Red
+            case 0x1E: buttonNumber = 1; r = 255; g = 0; b = 0; break;     // Button 1: Red
             case 0x1F: buttonNumber = 2; r = 0; g = 255; b = 0; break;     // Button 2: Green  
             case 0x20: buttonNumber = 3; r = 0; g = 0; b = 255; break;     // Button 3: Blue
             case 0x21: buttonNumber = 4; r = 255; g = 255; b = 0; break;   // Button 4: Yellow
-            case 0x22: buttonNumber = 5; r = 255; g = 0; b = 255; break;   // Button 5: Magenta
+            case 0x22: buttonNumber = 5; r = 255; g = 125; b = 255; break; // Button 5: Magenta
             
             // Row 2: Buttons 6-10 (based on breakdown mapping)
             case 0x23: buttonNumber = 6; r = 0; g = 255; b = 255; break;   // Button 6: Cyan
             case 0x24: buttonNumber = 7; r = 255; g = 128; b = 0; break;   // Button 7: Orange
             case 0x25: buttonNumber = 8; r = 128; g = 0; b = 255; break;   // Button 8: Purple
             case 0x26: buttonNumber = 9; r = 255; g = 255; b = 255; break; // Button 9: White
-            case 0x27: buttonNumber = 10; r = 128; g = 128; b = 128; break; // Button 10: Gray
+            case 0x27: buttonNumber = 10; r = 255; g = 128; b = 128; break; // Button 10: Light Red
             
             // Row 3: Buttons 11-15
             case 0x04: buttonNumber = 11; r = 255; g = 64; b = 64; break;   // Button 11: Light Red
@@ -1294,67 +1292,11 @@ void loop() {
   if (atomQueueGet(&controlpad_queue, 0, &event) == ATOM_OK) {
     // Distinguish between keyboard events (8 bytes) and control events (64 bytes)
     if (event.len == 8) {
-      // Standard HID keyboard event from Interface 0
+      // Standard HID keyboard event from Interface 0 - already processed in kbd_poll
       if (event.data[2] != 0 && event.data[2] < 0x80) {
         uint8_t key = event.data[2];
-        Serial.printf("⌨️ KEYBOARD Key Press: 0x%02X (%d) - Interface 0\n", key, key);
-        
-        // Trigger LED response for ALL 25 key presses
-        if (controlPadDriver) {
-          // Test the EXACT pattern from USB capture
-          Serial.printf("🔥 KEY PRESSED: 0x%02X - Testing EXACT LED pattern!\n", key);
-          
-          // Map HID codes to button numbers based on breakdown file
-          uint8_t buttonNumber = 0;
-          uint8_t r = 255, g = 0, b = 0; // Default red
-          
-          switch(key) {
-            // Row 1: Buttons 1-5
-            case 0x1E: 
-              buttonNumber = 1; r = 255; g = 0; b = 0; break;     // Button 1: Red
-            case 0x1F: buttonNumber = 2; r = 0; g = 255; b = 0; break;     // Button 2: Green  
-            case 0x20: buttonNumber = 3; r = 0; g = 0; b = 255; break;     // Button 3: Blue
-            case 0x21: buttonNumber = 4; r = 255; g = 255; b = 0; break;   // Button 4: Yellow
-            case 0x22: buttonNumber = 5; r = 255; g = 0; b = 255; break;   // Button 5: Magenta
-            
-            // Row 2: Buttons 6-10 (based on breakdown mapping)
-            case 0x23: buttonNumber = 6; r = 0; g = 255; b = 255; break;   // Button 6: Cyan
-            case 0x24: buttonNumber = 7; r = 255; g = 128; b = 0; break;   // Button 7: Orange
-            case 0x25: buttonNumber = 8; r = 128; g = 0; b = 255; break;   // Button 8: Purple
-            case 0x26: buttonNumber = 9; r = 255; g = 255; b = 255; break; // Button 9: White
-            case 0x27: buttonNumber = 10; r = 128; g = 128; b = 128; break; // Button 10: Gray
-            
-            // Row 3: Buttons 11-15
-            case 0x04: buttonNumber = 11; r = 255; g = 64; b = 64; break;   // Button 11: Light Red
-            case 0x05: buttonNumber = 12; r = 64; g = 255; b = 64; break;   // Button 12: Light Green
-            case 0x06: buttonNumber = 13; r = 64; g = 64; b = 255; break;   // Button 13: Light Blue
-            case 0x07: buttonNumber = 14; r = 192; g = 192; b = 0; break;   // Button 14: Dark Yellow
-            case 0x08: buttonNumber = 15; r = 192; g = 0; b = 192; break;   // Button 15: Dark Magenta
-            
-            // Row 4: Buttons 16-20
-            case 0x09: buttonNumber = 16; r = 0; g = 192; b = 192; break;   // Button 16: Dark Cyan
-            case 0x0A: buttonNumber = 17; r = 255; g = 192; b = 128; break; // Button 17: Peach
-            case 0x0B: buttonNumber = 18; r = 128; g = 255; b = 192; break; // Button 18: Mint (split RGB!)
-            case 0x0C: buttonNumber = 19; r = 192; g = 128; b = 255; break; // Button 19: Lavender
-            case 0x0D: buttonNumber = 20; r = 255; g = 255; b = 128; break; // Button 20: Light Yellow
-            
-            // Row 5: Buttons 21-24 (button 24 is 2-wide)
-            case 0x00: buttonNumber = 21; r = 128; g = 255; b = 255; break; // Button 21: Light Cyan
-            case 0x0F: buttonNumber = 22; r = 255; g = 128; b = 255; break; // Button 22: Light Magenta
-            case 0x10: buttonNumber = 23; r = 255; g = 255; b = 192; break; // Button 23: Cream
-            case 0x11: buttonNumber = 24; r = 64; g = 128; b = 192; break;  // Button 24: Steel Blue
-            
-            default:
-              Serial.printf("🔍 Unknown key: 0x%02X - using button 1 with white\n", key);
-              buttonNumber = 1; r = 255; g = 255; b = 255;
-              break;
-          }
-          
-          if (buttonNumber > 0) {
-            Serial.printf("🎯 Mapping HID 0x%02X to Button %d with RGB(%d,%d,%d)\n", key, buttonNumber, r, g, b);
-            controlPadDriver->sendSimpleLEDTest(buttonNumber, r, g, b);
-          }
-        }
+        Serial.printf("⌨️ KEYBOARD Key Press: 0x%02X (%d) - Already processed in kbd_poll\n", key, key);
+        // Note: LED processing is handled immediately in kbd_poll for better response time
       }
     } else if (event.len == 64) {
       // Control event from Interface 1 - reduce spam
@@ -1370,15 +1312,15 @@ void loop() {
   }
   
   // Test LED commands periodically (every 15 seconds)
-  static unsigned long lastLEDTest = 0;
-  if (millis() - lastLEDTest > 15000) {
-    if (controlPadDriver) {
-      Serial.println("\n🔴 Periodic LED test - RED...");
-      controlPadDriver->setLEDs(255, 0, 0);
-    } else {
-      Serial.println("\n⚠️ No controlPadDriver instance - factory system may not be working");
-      Serial.printf("Factory registered: %s\n", USBControlPad::factory_registered ? "YES" : "NO");
-    }
-    lastLEDTest = millis();
-  }
+  // static unsigned long lastLEDTest = 0;
+  // if (millis() - lastLEDTest > 15000) {
+  //   if (controlPadDriver) {
+  //     Serial.println("\n🔴 Periodic LED test - RED...");
+  //     controlPadDriver->setLEDs(255, 0, 0);
+  //   } else {
+  //     Serial.println("\n⚠️ No controlPadDriver instance - factory system may not be working");
+  //     Serial.printf("Factory registered: %s\n", USBControlPad::factory_registered ? "YES" : "NO");
+  //   }
+  //   lastLEDTest = millis();
+  // }
 } 
