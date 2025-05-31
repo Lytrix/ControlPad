@@ -289,6 +289,224 @@ public:
     return (result1 == 0 && result2 == 0 && result3 == 0 && result4 == 0 && result5 == 0);
   }
 
+  // NEW: 5-Command LED Protocol based on breakdown analysis
+  bool send5CommandLEDSequence(uint8_t buttonNumber, uint8_t r, uint8_t g, uint8_t b) {
+    Serial.printf("🎯 Setting LED for button %d to RGB(%d,%d,%d) using 5-command protocol\n", buttonNumber, r, g, b);
+    
+    // Command 1: Set effect (custom mode)
+    uint8_t cmd1_data[62] = {0};
+    cmd1_data[0] = 0x01; cmd1_data[1] = 0x00; cmd1_data[2] = 0x00; cmd1_data[3] = 0x00;
+    cmd1_data[4] = 0x02; cmd1_data[5] = 0x00; cmd1_data[6] = 0x00; cmd1_data[7] = 0x00;
+    // Custom mode bytes
+    cmd1_data[8] = 0xbb; cmd1_data[9] = 0xbb; cmd1_data[10] = 0xbb; cmd1_data[11] = 0xbb;
+    cmd1_data[12] = 0xbb; cmd1_data[13] = 0xbb; cmd1_data[14] = 0xbb; cmd1_data[15] = 0xbb;
+    
+    if (!sendRawCommand(0x56, 0x81, cmd1_data, 62)) {
+      Serial.println("❌ Command 1 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 2: Package 1 of 2 - LED data part 1
+    uint8_t cmd2_data[62] = {0};
+    // EXACT pattern from breakdown: 568300000100000080010000ff0000000000ffff00000000
+    cmd2_data[0] = 0x00; cmd2_data[1] = 0x00; cmd2_data[2] = 0x01; cmd2_data[3] = 0x00; 
+    cmd2_data[4] = 0x00; cmd2_data[5] = 0x00; cmd2_data[6] = 0x80; cmd2_data[7] = 0x01; 
+    cmd2_data[8] = 0x00; cmd2_data[9] = 0x00; cmd2_data[10] = 0xff; cmd2_data[11] = 0x00; 
+    cmd2_data[12] = 0x00; cmd2_data[13] = 0x00; cmd2_data[14] = 0x00; cmd2_data[15] = 0x00; 
+    cmd2_data[16] = 0xff; cmd2_data[17] = 0xff; cmd2_data[18] = 0x00; cmd2_data[19] = 0x00; 
+    cmd2_data[20] = 0x00; cmd2_data[21] = 0x00;
+    
+    // LED data arranged by columns (5 rows x 5 columns = 25 LEDs, but button 24 is omitted)
+    // Set specific LED based on button number
+    int ledDataStart = 22;  // RGB data starts after the header pattern
+    
+    // Button mapping based on your breakdown:
+    // Button 1-5: positions 0,5,10,15,20 in LED data
+    // Button 6-10: positions 1,6,11,16,21
+    // Button 11-15: positions 2,7,12,17,22
+    // Button 16-20: positions 3,8,13,18,23
+    // Button 21-24: positions 4,9,14,19 (24 omitted)
+    
+    // Clear all LEDs first, then set the specific one
+    for (int i = 0; i < 40 && (ledDataStart + i + 2) < 62; i += 3) { // Fit within 64-byte packet
+      cmd2_data[ledDataStart + i] = 0x00;     // R
+      cmd2_data[ledDataStart + i + 1] = 0x00; // G  
+      cmd2_data[ledDataStart + i + 2] = 0x00; // B
+    }
+    
+    // Calculate LED position based on button number (1-24)
+    if (buttonNumber >= 1 && buttonNumber <= 24) {
+      // Convert button number to column/row
+      int col = (buttonNumber - 1) % 5;  // 0-4
+      int row = (buttonNumber - 1) / 5;  // 0-4
+      int ledIndex = col * 5 + row;      // Column-major order
+      
+      // Handle the split RGB for button 18 (LED index 17)
+      if (ledIndex < 17) {
+        // Normal LED - fits entirely in command 2
+        int rgbOffset = ledDataStart + (ledIndex * 3);
+        if (rgbOffset + 2 < 62) {  // Ensure we don't exceed packet size
+          cmd2_data[rgbOffset] = r;     // R
+          cmd2_data[rgbOffset + 1] = g; // G
+          cmd2_data[rgbOffset + 2] = b; // B
+        }
+      } else if (ledIndex == 17) {
+        // Button 18 - R value goes in command 2, GB in command 3
+        int rgbOffset = ledDataStart + (ledIndex * 3);
+        if (rgbOffset < 62) {
+          cmd2_data[rgbOffset] = r;     // R only
+        }
+        // G and B will be set in command 3
+      }
+      // LEDs 18+ will be handled in command 3
+    }
+    
+    // Only set the specific button's LED (button 1 = first RGB triplet)
+    if (buttonNumber == 1) {
+      cmd2_data[22] = r; cmd2_data[23] = g; cmd2_data[24] = b; // Button 1
+    }
+    
+    // Debug: Show the exact packet for verification
+    Serial.print("📦 Command 2 packet (first 32 bytes): ");
+    for (int i = 0; i < 32; i++) {
+      Serial.printf("%02X", cmd2_data[i]);
+    }
+    Serial.println();
+    
+    if (!sendRawCommand(0x56, 0x83, cmd2_data, 62)) {
+      Serial.println("❌ Command 2 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 3: Package 2 of 2 - remaining LED data
+    uint8_t cmd3_data[62] = {0x01, 0x00}; // Only the data part, not command bytes
+    
+    // Continue LED data for buttons 18-24
+    if (buttonNumber >= 1 && buttonNumber <= 24) {
+      int col = (buttonNumber - 1) % 5;
+      int row = (buttonNumber - 1) / 5;
+      int ledIndex = col * 5 + row;
+      
+      if (ledIndex == 17) {
+        // Button 18 - complete the GB values
+        cmd3_data[2] = 0x00; // Masked 00 for button 18
+        cmd3_data[3] = g;    // G for button 18  
+        cmd3_data[4] = b;    // B for button 18
+      } else if (ledIndex >= 18) {
+        // Buttons 19-24
+        int cmd3LedIndex = ledIndex - 18;  // 0-5 for LEDs 19-24
+        int rgbOffset = 5 + (cmd3LedIndex * 3);  // Start after button 18's 00GB
+        if (rgbOffset + 2 < 62) {  // Ensure we don't exceed packet size
+          cmd3_data[rgbOffset] = r;
+          cmd3_data[rgbOffset + 1] = g;
+          cmd3_data[rgbOffset + 2] = b;
+        }
+      }
+    }
+    
+    if (!sendRawCommand(0x56, 0x83, cmd3_data, 62)) {
+      Serial.println("❌ Command 3 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 4: Apply command
+    uint8_t cmd4_data[62] = {0};
+    if (!sendRawCommand(0x41, 0x80, cmd4_data, 62)) {
+      Serial.println("❌ Command 4 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 5: Final command
+    uint8_t cmd5_data[62] = {0xff, 0x00};
+    if (!sendRawCommand(0x51, 0x28, cmd5_data, 62)) {
+      Serial.println("❌ Command 5 failed");
+      return false;
+    }
+    
+    Serial.println("✅ 5-command LED sequence completed!");
+    return true;
+  }
+
+  // NEW: Simplified test function using exact breakdown mapping
+  bool sendSimpleLEDTest(uint8_t buttonNumber, uint8_t r, uint8_t g, uint8_t b) {
+    Serial.printf("🧪 SIMPLE LED Test: Button %d = RGB(%d,%d,%d)\n", buttonNumber, r, g, b);
+    
+    // Command 1: Set effect (exact from breakdown)
+    uint8_t cmd1_data[62] = {0}; // 62 bytes of data (64 total - 2 command bytes)
+    cmd1_data[0] = 0x00; cmd1_data[1] = 0x00;
+    cmd1_data[2] = 0x01; cmd1_data[3] = 0x00; cmd1_data[4] = 0x00; cmd1_data[5] = 0x00;
+    cmd1_data[6] = 0x02; cmd1_data[7] = 0x00; cmd1_data[8] = 0x00; cmd1_data[9] = 0x00;
+    // Custom mode
+    cmd1_data[10] = 0xbb; cmd1_data[11] = 0xbb; cmd1_data[12] = 0xbb; cmd1_data[13] = 0xbb;
+    cmd1_data[14] = 0xbb; cmd1_data[15] = 0xbb; cmd1_data[16] = 0xbb; cmd1_data[17] = 0xbb;
+    
+    if (!sendTestPacket(0x56, 0x81, cmd1_data, 62)) {
+      Serial.println("❌ Simple Command 1 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 2: LED data package 1 (exact from breakdown)
+    uint8_t cmd2_data[62] = {0}; 
+    // EXACT pattern from breakdown: 568300000100000080010000ff0000000000ffff00000000
+    // (56 83 are command bytes, so data starts with 00 00...)
+    cmd2_data[0] = 0x00; cmd2_data[1] = 0x00; cmd2_data[2] = 0x01; cmd2_data[3] = 0x00; 
+    cmd2_data[4] = 0x00; cmd2_data[5] = 0x00; cmd2_data[6] = 0x80; cmd2_data[7] = 0x01; 
+    cmd2_data[8] = 0x00; cmd2_data[9] = 0x00; cmd2_data[10] = 0xff; cmd2_data[11] = 0x00; 
+    cmd2_data[12] = 0x00; cmd2_data[13] = 0x00; cmd2_data[14] = 0x00; cmd2_data[15] = 0x00; 
+    cmd2_data[16] = 0xff; cmd2_data[17] = 0xff; cmd2_data[18] = 0x00; cmd2_data[19] = 0x00; 
+    cmd2_data[20] = 0x00; cmd2_data[21] = 0x00;
+    
+    // Only set the specific button's LED (button 1 = first RGB triplet)
+    if (buttonNumber == 1) {
+      cmd2_data[22] = r; cmd2_data[23] = g; cmd2_data[24] = b; // Button 1
+    }
+    
+    // Debug: Show the exact packet for verification  
+    Serial.print("📦 Simple Command 2 packet: 56 83 ");
+    for (int i = 0; i < 32; i++) {
+      Serial.printf("%02X", cmd2_data[i]);
+    }
+    Serial.println();
+    
+    if (!sendRawCommand(0x56, 0x83, cmd2_data, 62)) {
+      Serial.println("❌ Simple Command 2 failed");  
+      return false;
+    }
+    delay(10);
+    
+    // Command 3: LED data package 2 (mostly zeros for this simple test)
+    uint8_t cmd3_data[62] = {0x01, 0x00}; // Just the sub-command
+    
+    if (!sendRawCommand(0x56, 0x83, cmd3_data, 62)) {
+      Serial.println("❌ Simple Command 3 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 4: Apply
+    uint8_t cmd4_data[62] = {0};
+    if (!sendRawCommand(0x41, 0x80, cmd4_data, 62)) {
+      Serial.println("❌ Simple Command 4 failed");
+      return false;
+    }
+    delay(10);
+    
+    // Command 5: Final
+    uint8_t cmd5_data[62] = {0xff, 0x00};
+    if (!sendRawCommand(0x51, 0x28, cmd5_data, 62)) {
+      Serial.println("❌ Simple Command 5 failed");
+      return false;
+    }
+    
+    Serial.println("✅ Simple LED test completed!");
+    return true;
+  }
+
   bool sendExactLEDCommand() {
     // Try the complete sequence first
     if (sendCompleteRedSequence()) {
@@ -375,6 +593,88 @@ public:
     return false;
   }
   
+  // NEW: Raw command function for 91-byte packets (5-command protocol)
+  bool sendRawCommand(uint8_t cmd1, uint8_t cmd2, uint8_t* data, size_t dataLen) {
+    // Create 64-byte packet (USB interrupt endpoint standard)
+    uint8_t packet[64] = {0};
+    packet[0] = cmd1;
+    packet[1] = cmd2;
+    
+    // Copy data starting from byte 2
+    if (data && dataLen > 0) {
+      size_t copyLen = (dataLen > 62) ? 62 : dataLen;  // 64 - 2 header bytes
+      memcpy(&packet[2], data, copyLen);
+    }
+    
+    Serial.printf("📤 Sending 64-byte command: 0x%02X 0x%02X (data len: %zu)\n", cmd1, cmd2, dataLen);
+    
+    // Send raw 64-byte packet to control endpoint
+    int maxRetries = 3;
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+      int result = InterruptMessage(ctrl_ep_out, 64, packet, &send_cb);
+      if (result == 0) {
+        if (attempt > 0) {
+          Serial.printf("✅ 64-byte command succeeded on attempt %d\n", attempt + 1);
+        }
+        return true;
+      } else {
+        Serial.printf("⚠️ 64-byte command attempt %d failed: %d\n", attempt + 1, result);
+        if (attempt < maxRetries - 1) {
+          delay(20);
+        }
+      }
+    }
+    
+    Serial.printf("❌ 64-byte command failed after %d attempts\n", maxRetries);
+    return false;
+  }
+
+  // NEW: Test both packet sizes to see which works
+  bool sendTestPacket(uint8_t cmd1, uint8_t cmd2, uint8_t* data, size_t dataLen) {
+    Serial.printf("🧪 Testing packet sizes for command 0x%02X 0x%02X\n", cmd1, cmd2);
+    
+    // Try 64-byte first (traditional USB interrupt packet size)
+    Serial.println("   Trying 64-byte packet...");
+    uint8_t packet64[64] = {0};
+    packet64[0] = cmd1;
+    packet64[1] = cmd2;
+    if (data && dataLen > 0) {
+      size_t copyLen = (dataLen > 62) ? 62 : dataLen;
+      memcpy(&packet64[2], data, copyLen);
+    }
+    
+    int result64 = InterruptMessage(ctrl_ep_out, 64, packet64, &send_cb);
+    Serial.printf("   64-byte result: %d\n", result64);
+    
+    if (result64 == 0) {
+      Serial.println("✅ 64-byte packet worked!");
+      return true;
+    }
+    
+    delay(50);
+    
+    // Try 91-byte if 64 failed
+    Serial.println("   Trying 91-byte packet...");
+    uint8_t packet91[91] = {0};
+    packet91[0] = cmd1;
+    packet91[1] = cmd2;
+    if (data && dataLen > 0) {
+      size_t copyLen = (dataLen > 89) ? 89 : dataLen;
+      memcpy(&packet91[2], data, copyLen);
+    }
+    
+    int result91 = InterruptMessage(ctrl_ep_out, 91, packet91, &send_cb);
+    Serial.printf("   91-byte result: %d\n", result91);
+    
+    if (result91 == 0) {
+      Serial.println("✅ 91-byte packet worked!");
+      return true;
+    }
+    
+    Serial.println("❌ Both packet sizes failed!");
+    return false;
+  }
+
   bool sendCommand(uint8_t cmd1, uint8_t cmd2, uint8_t* extraData = nullptr, size_t extraLen = 0) {
     ControlPadPacket packet;
     packet.vendor_id = 0x52;  // Keep old protocol for non-LED commands
@@ -609,6 +909,65 @@ public:
           Serial.printf("0x%02X ", kbd_report[i]);
         }
         Serial.println();
+        
+        // Trigger LED response for ALL 25 key presses
+        if (controlPadDriver) {
+          // Test the EXACT pattern from USB capture
+          Serial.printf("🔥 KEY PRESSED: 0x%02X - Testing EXACT LED pattern!\n", kbd_report[2]);
+          
+          // Map HID codes to button numbers based on breakdown file
+          uint8_t buttonNumber = 0;
+          uint8_t r = 255, g = 0, b = 0; // Default red
+          
+          switch(kbd_report[2]) {
+            // Row 1: Buttons 1-5
+            case 0x1E: 
+              Serial.println("🔴 Button 1 pressed (loop) - using SIMPLE test");
+              controlPadDriver->sendSimpleLEDTest(1, 255, 0, 0);
+              return; // Exit early
+            case 0x1F: buttonNumber = 2; r = 0; g = 255; b = 0; break;     // Button 2: Green  
+            case 0x20: buttonNumber = 3; r = 0; g = 0; b = 255; break;     // Button 3: Blue
+            case 0x21: buttonNumber = 4; r = 255; g = 255; b = 0; break;   // Button 4: Yellow
+            case 0x22: buttonNumber = 5; r = 255; g = 0; b = 255; break;   // Button 5: Magenta
+            
+            // Row 2: Buttons 6-10 (based on breakdown mapping)
+            case 0x23: buttonNumber = 6; r = 0; g = 255; b = 255; break;   // Button 6: Cyan
+            case 0x24: buttonNumber = 7; r = 255; g = 128; b = 0; break;   // Button 7: Orange
+            case 0x25: buttonNumber = 8; r = 128; g = 0; b = 255; break;   // Button 8: Purple
+            case 0x26: buttonNumber = 9; r = 255; g = 255; b = 255; break; // Button 9: White
+            case 0x27: buttonNumber = 10; r = 128; g = 128; b = 128; break; // Button 10: Gray
+            
+            // Row 3: Buttons 11-15
+            case 0x04: buttonNumber = 11; r = 255; g = 64; b = 64; break;   // Button 11: Light Red
+            case 0x05: buttonNumber = 12; r = 64; g = 255; b = 64; break;   // Button 12: Light Green
+            case 0x06: buttonNumber = 13; r = 64; g = 64; b = 255; break;   // Button 13: Light Blue
+            case 0x07: buttonNumber = 14; r = 192; g = 192; b = 0; break;   // Button 14: Dark Yellow
+            case 0x08: buttonNumber = 15; r = 192; g = 0; b = 192; break;   // Button 15: Dark Magenta
+            
+            // Row 4: Buttons 16-20
+            case 0x09: buttonNumber = 16; r = 0; g = 192; b = 192; break;   // Button 16: Dark Cyan
+            case 0x0A: buttonNumber = 17; r = 255; g = 192; b = 128; break; // Button 17: Peach
+            case 0x0B: buttonNumber = 18; r = 128; g = 255; b = 192; break; // Button 18: Mint (split RGB!)
+            case 0x0C: buttonNumber = 19; r = 192; g = 128; b = 255; break; // Button 19: Lavender
+            case 0x0D: buttonNumber = 20; r = 255; g = 255; b = 128; break; // Button 20: Light Yellow
+            
+            // Row 5: Buttons 21-24 (button 24 is 2-wide)
+            case 0x00: buttonNumber = 21; r = 128; g = 255; b = 255; break; // Button 21: Light Cyan
+            case 0x0F: buttonNumber = 22; r = 255; g = 128; b = 255; break; // Button 22: Light Magenta
+            case 0x10: buttonNumber = 23; r = 255; g = 255; b = 192; break; // Button 23: Cream
+            case 0x11: buttonNumber = 24; r = 64; g = 128; b = 192; break;  // Button 24: Steel Blue
+            
+            default:
+              Serial.printf("🔍 Unknown key: 0x%02X - using button 1 with white\n", kbd_report[2]);
+              buttonNumber = 1; r = 255; g = 255; b = 255;
+              break;
+          }
+          
+          if (buttonNumber > 0) {
+            Serial.printf("🎯 Mapping HID 0x%02X to Button %d with RGB(%d,%d,%d)\n", kbd_report[2], buttonNumber, r, g, b);
+            controlPadDriver->send5CommandLEDSequence(buttonNumber, r, g, b);
+          }
+        }
       }
       
       // Restart keyboard polling
@@ -833,53 +1192,59 @@ void loop() {
         if (controlPadDriver) {
           // Test the EXACT pattern from USB capture
           Serial.printf("🔥 KEY PRESSED: 0x%02X - Testing EXACT LED pattern!\n", key);
-          controlPadDriver->sendExactLEDCommand();
           
-          /* OLD rainbow mapping - disabled for testing
-          // Create a rainbow mapping for all 25 buttons
+          // Map HID codes to button numbers based on breakdown file
+          uint8_t buttonNumber = 0;
+          uint8_t r = 255, g = 0, b = 0; // Default red
+          
           switch(key) {
-            // Row 1: 1-5 (Red spectrum)
-            case 0x1E: controlPadDriver->setLEDs(255, 0, 0); break;     // Button 1: Red
-            case 0x1F: controlPadDriver->setLEDs(255, 64, 0); break;    // Button 2: Red-Orange
-            case 0x20: controlPadDriver->setLEDs(255, 128, 0); break;   // Button 3: Orange
-            case 0x21: controlPadDriver->setLEDs(255, 192, 0); break;   // Button 4: Yellow-Orange
-            case 0x22: controlPadDriver->setLEDs(255, 255, 0); break;   // Button 5: Yellow
+            // Row 1: Buttons 1-5
+            case 0x1E: 
+              Serial.println("🔴 Button 1 pressed (loop) - using SIMPLE test");
+              controlPadDriver->sendSimpleLEDTest(1, 255, 0, 0);
+              return; // Exit early
+            case 0x1F: buttonNumber = 2; r = 0; g = 255; b = 0; break;     // Button 2: Green  
+            case 0x20: buttonNumber = 3; r = 0; g = 0; b = 255; break;     // Button 3: Blue
+            case 0x21: buttonNumber = 4; r = 255; g = 255; b = 0; break;   // Button 4: Yellow
+            case 0x22: buttonNumber = 5; r = 255; g = 0; b = 255; break;   // Button 5: Magenta
             
-            // Row 2: QWERT (Green spectrum)
-            case 0x14: controlPadDriver->setLEDs(192, 255, 0); break;   // Q: Yellow-Green
-            case 0x1A: controlPadDriver->setLEDs(128, 255, 0); break;   // W: Light Green
-            case 0x08: controlPadDriver->setLEDs(64, 255, 0); break;    // E: Green
-            case 0x15: controlPadDriver->setLEDs(0, 255, 0); break;     // R: Pure Green
-            case 0x17: controlPadDriver->setLEDs(0, 255, 64); break;    // T: Green-Cyan
+            // Row 2: Buttons 6-10 (based on breakdown mapping)
+            case 0x23: buttonNumber = 6; r = 0; g = 255; b = 255; break;   // Button 6: Cyan
+            case 0x24: buttonNumber = 7; r = 255; g = 128; b = 0; break;   // Button 7: Orange
+            case 0x25: buttonNumber = 8; r = 128; g = 0; b = 255; break;   // Button 8: Purple
+            case 0x26: buttonNumber = 9; r = 255; g = 255; b = 255; break; // Button 9: White
+            case 0x27: buttonNumber = 10; r = 128; g = 128; b = 128; break; // Button 10: Gray
             
-            // Row 3: ASDFG (Cyan spectrum)
-            case 0x04: controlPadDriver->setLEDs(0, 255, 128); break;   // A: Cyan
-            case 0x16: controlPadDriver->setLEDs(0, 255, 192); break;   // S: Light Cyan
-            case 0x07: controlPadDriver->setLEDs(0, 255, 255); break;   // D: Pure Cyan
-            case 0x09: controlPadDriver->setLEDs(0, 192, 255); break;   // F: Cyan-Blue
-            case 0x0A: controlPadDriver->setLEDs(0, 128, 255); break;   // G: Light Blue
+            // Row 3: Buttons 11-15
+            case 0x04: buttonNumber = 11; r = 255; g = 64; b = 64; break;   // Button 11: Light Red
+            case 0x05: buttonNumber = 12; r = 64; g = 255; b = 64; break;   // Button 12: Light Green
+            case 0x06: buttonNumber = 13; r = 64; g = 64; b = 255; break;   // Button 13: Light Blue
+            case 0x07: buttonNumber = 14; r = 192; g = 192; b = 0; break;   // Button 14: Dark Yellow
+            case 0x08: buttonNumber = 15; r = 192; g = 0; b = 192; break;   // Button 15: Dark Magenta
             
-            // Row 4: ZXCVB (Blue spectrum)
-            case 0x1D: controlPadDriver->setLEDs(0, 64, 255); break;    // Z: Blue
-            case 0x1B: controlPadDriver->setLEDs(0, 0, 255); break;     // X: Pure Blue
-            case 0x06: controlPadDriver->setLEDs(64, 0, 255); break;    // C: Blue-Purple
-            case 0x19: controlPadDriver->setLEDs(128, 0, 255); break;   // V: Purple
-            case 0x05: controlPadDriver->setLEDs(192, 0, 255); break;   // B: Purple-Magenta
+            // Row 4: Buttons 16-20
+            case 0x09: buttonNumber = 16; r = 0; g = 192; b = 192; break;   // Button 16: Dark Cyan
+            case 0x0A: buttonNumber = 17; r = 255; g = 192; b = 128; break; // Button 17: Peach
+            case 0x0B: buttonNumber = 18; r = 128; g = 255; b = 192; break; // Button 18: Mint (split RGB!)
+            case 0x0C: buttonNumber = 19; r = 192; g = 128; b = 255; break; // Button 19: Lavender
+            case 0x0D: buttonNumber = 20; r = 255; g = 255; b = 128; break; // Button 20: Light Yellow
             
-            // Row 5: Additional keys (Magenta/Pink spectrum)
-            case 0x1C: controlPadDriver->setLEDs(255, 0, 255); break;   // Enter: Magenta
-            case 0x18: controlPadDriver->setLEDs(255, 0, 192); break;   // Key: Pink
-            case 0x0C: controlPadDriver->setLEDs(255, 0, 128); break;   // Key: Hot Pink
-            case 0x2C: controlPadDriver->setLEDs(255, 255, 255); break; // Space: White
-            case 0x35: controlPadDriver->setLEDs(128, 128, 128); break; // Tilde: Gray
+            // Row 5: Buttons 21-24 (button 24 is 2-wide)
+            case 0x00: buttonNumber = 21; r = 128; g = 255; b = 255; break; // Button 21: Light Cyan
+            case 0x0F: buttonNumber = 22; r = 255; g = 128; b = 255; break; // Button 22: Light Magenta
+            case 0x10: buttonNumber = 23; r = 255; g = 255; b = 192; break; // Button 23: Cream
+            case 0x11: buttonNumber = 24; r = 64; g = 128; b = 192; break;  // Button 24: Steel Blue
             
-            // Default for any unmapped keys
-            default: 
-              Serial.printf("🔍 Unknown key: 0x%02X - using white\n", key);
-              controlPadDriver->setLEDs(255, 255, 255); 
+            default:
+              Serial.printf("🔍 Unknown key: 0x%02X - using button 1 with white\n", key);
+              buttonNumber = 1; r = 255; g = 255; b = 255;
               break;
           }
-          */
+          
+          if (buttonNumber > 0) {
+            Serial.printf("🎯 Mapping HID 0x%02X to Button %d with RGB(%d,%d,%d)\n", key, buttonNumber, r, g, b);
+            controlPadDriver->send5CommandLEDSequence(buttonNumber, r, g, b);
+          }
         }
       }
     } else if (event.len == 64) {
