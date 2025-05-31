@@ -1,0 +1,70 @@
+
+// command 1 set effect (bbbbbb=custom mode, 555555=static mode)
+56
+81
+0000
+
+01000000
+02000000
+
+bbbbbbbb //custom mode
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 // trailing zeros
+
+// command 2 package 1 of 2
+56
+83
+0000
+01000000
+80010000
+ff000000
+0000
+ff
+ff //brighness for all leds
+
+00000000
+
+fbfcfd //rgb led button 1  0x1E
+fbfcfd //rgb led button 6  0x23
+fbfcfd //rgb led button 11 0x04
+fbfcfd //rgb led button 16 0x09
+fbfcfd //rgb led button 21 0x00
+  
+c9cacb //rgb led button 2  0x1F
+c9cacb //rgb led button 7  0x24
+c9cacb //rgb led button 12 0x05
+c9cacb //rgb led button 17 0x0A
+c9cacb //rgb led button 22 0x0F
+
+979899 //rgb led button 3  0x20
+979899 //rgb led button 8  0x25
+979899 //rgb led button 13 0x06
+97     //r   ..start of led rgb button 18
+
+// command 3 package 2 of 2
+568301 
+
+009899 // gb led button 18 0x0B
+979899 //rgb led button 23 0x10
+
+656667 //rgb led button 4  0x21 
+656667 //rgb led button 9  0x26
+656667 //rgb led button 14 0x07
+656667 //rgb led button 19 0x0C
+656667 //rgb led button 24 0x11
+
+333435 //rgb led button 5  0x22
+333435 //rgb led button 10 0x27
+333435 //rgb led button 15 0x08
+333435 //rgb led button 20 0x0D 
+00000000000000000000000000000000000000000000000000000000  // trailing zeros
+
+command 4
+4180
+0000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000  // trailing zeros
+
+command 5
+5128
+0000
+ff00
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 // trailing zeros 
