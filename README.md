@@ -16,7 +16,6 @@ This project provides a **fully functional reverse-engineered driver** for the C
 - ✅ **Advanced LED protocol** - 5-command sequence fully reverse-engineered
 - ✅ **Failsafe mode resolution** - prevents device lockup/static mode issues
 - ✅ **Perfect button mapping** - accurate 1:1 correspondence between buttons and LEDs
-- ✅ **Beautiful baseline lighting** - sophisticated purple gradient with rainbow patterns
 - ✅ **Dual-interface USB communication** (keyboard input + LED control)
 - ✅ **Real-time button response** with custom LED mappings
 - ✅ **Complete USB protocol capture analysis** from Wireshark
@@ -34,7 +33,6 @@ This project provides a **fully functional reverse-engineered driver** for the C
 - **Individual button LED control** for all 24 RGB buttons
 - **5-Command LED Protocol** fully implemented and working
 - **Complete LED state management** - prevents device failsafe/static mode
-- **Beautiful baseline patterns** with purple gradients and rainbow effects
 - **Perfect button-to-LED mapping** correction completed
 
 ### ✅ **Advanced Button Detection**
