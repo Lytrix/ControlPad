@@ -453,12 +453,9 @@ public:
 
   // NEW: Simplified test function using exact breakdown mapping
   bool sendSimpleLEDTest(uint8_t buttonNumber, uint8_t r, uint8_t g, uint8_t b) {
-    Serial.printf("🧪 EXACT PATTERN LED Protocol: Button %d = RGB(%d,%d,%d)\n", buttonNumber, r, g, b);
+    Serial.printf("🧪 COMPLETE STATE LED Protocol: Button %d = RGB(%d,%d,%d)\n", buttonNumber, r, g, b);
     
-    // Use EXACT byte patterns from working USB capture
-    // This avoids any potential protocol interpretation errors
-    
-    // Command 1: EXACT pattern from capture (56 81 00 00 01 00 00 00 02 00 00 00 bb bb bb bb)
+    // Command 1: EXACT custom mode pattern from working capture
     uint8_t cmd1[64] = {
       0x56, 0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xbb, 0xbb, 0xbb, 0xbb,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -466,47 +463,103 @@ public:
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     
-    // Command 2: EXACT pattern with specific button highlighted
+    // Command 2: Complete LED state from working capture with ALL buttons defined
     uint8_t cmd2[64] = {
       0x56, 0x83, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+      0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 
+      // LED data starts here (position 24) - ALL 24 buttons get proper values
+      0xfb, 0xfc, 0xfd,  // Button 1 (positions 24-26) - default or target
+      0xfb, 0xfc, 0xfd,  // Button 6 (positions 27-29)
+      0xfb, 0xfc, 0xfd,  // Button 11 (positions 30-32)
+      0xfb, 0xfc, 0xfd,  // Button 16 (positions 33-35)
+      0xfb, 0xfc, 0xfd,  // Button 21 (positions 36-38)
+      0xc9, 0xca, 0xcb,  // Button 2 (positions 39-41)
+      0xc9, 0xca, 0xcb,  // Button 7 (positions 42-44)
+      0xc9, 0xca, 0xcb,  // Button 12 (positions 45-47)
+      0xc9, 0xca, 0xcb,  // Button 17 (positions 48-50)
+      0xc9, 0xca, 0xcb,  // Button 22 (positions 51-53)
+      0x97, 0x98, 0x99,  // Button 3 (positions 54-56)
+      0x97, 0x98, 0x99,  // Button 8 (positions 57-59)
+      0x97, 0x98, 0x99,  // Button 13 (positions 60-62)
+      0x97               // Button 18 R component (position 63)
     };
     
-    // Modify cmd2 based on which button is pressed
+    // Override the specific button with bright target color
     if (buttonNumber == 1) {
-      // Button 1 at position 24-26: RGB
-      cmd2[24] = r; cmd2[25] = g; cmd2[26] = b;
+      cmd2[24] = r; cmd2[25] = g; cmd2[26] = b;  // Button 1
     } else if (buttonNumber == 2) {
-      // Button 2 at position 39-41: RGB  
-      cmd2[39] = r; cmd2[40] = g; cmd2[41] = b;
+      cmd2[39] = r; cmd2[40] = g; cmd2[41] = b;  // Button 2
     } else if (buttonNumber == 3) {
-      // Button 3 at position 54-56: RGB
-      cmd2[54] = r; cmd2[55] = g; cmd2[56] = b;
-    } else {
-      // For other buttons, just light up button 1 as fallback
-      cmd2[24] = r; cmd2[25] = g; cmd2[26] = b;
+      cmd2[54] = r; cmd2[55] = g; cmd2[56] = b;  // Button 3
+    } else if (buttonNumber == 6) {
+      cmd2[27] = r; cmd2[28] = g; cmd2[29] = b;  // Button 6
+    } else if (buttonNumber == 7) {
+      cmd2[42] = r; cmd2[43] = g; cmd2[44] = b;  // Button 7
+    } else if (buttonNumber == 8) {
+      cmd2[57] = r; cmd2[58] = g; cmd2[59] = b;  // Button 8
+    } else if (buttonNumber == 11) {
+      cmd2[30] = r; cmd2[31] = g; cmd2[32] = b;  // Button 11
+    } else if (buttonNumber == 12) {
+      cmd2[45] = r; cmd2[46] = g; cmd2[47] = b;  // Button 12
+    } else if (buttonNumber == 13) {
+      cmd2[60] = r; cmd2[61] = g; cmd2[62] = b;  // Button 13
+    } else if (buttonNumber == 16) {
+      cmd2[33] = r; cmd2[34] = g; cmd2[35] = b;  // Button 16
+    } else if (buttonNumber == 17) {
+      cmd2[48] = r; cmd2[49] = g; cmd2[50] = b;  // Button 17
+    } else if (buttonNumber == 18) {
+      cmd2[63] = r;  // Button 18 R component (continues in cmd3)
+    } else if (buttonNumber == 21) {
+      cmd2[36] = r; cmd2[37] = g; cmd2[38] = b;  // Button 21
+    } else if (buttonNumber == 22) {
+      cmd2[51] = r; cmd2[52] = g; cmd2[53] = b;  // Button 22
     }
     
-    // Command 3: EXACT pattern from capture
+    // Command 3: Complete remaining LED state from working capture
     uint8_t cmd3[64] = {
-      0x56, 0x83, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x56, 0x83, 0x01, 0x00, 
+      0x98, 0x99,              // Button 18 GB (positions 4-5) - continues from cmd2 R
+      0x97, 0x98, 0x99,        // Button 23 (positions 6-8)
+      0x65, 0x66, 0x67,        // Button 4 (positions 9-11)
+      0x65, 0x66, 0x67,        // Button 9 (positions 12-14)
+      0x65, 0x66, 0x67,        // Button 14 (positions 15-17)
+      0x65, 0x66, 0x67,        // Button 19 (positions 18-20)
+      0x65, 0x66, 0x67,        // Button 24 (positions 21-23)
+      0x33, 0x34, 0x35,        // Button 5 (positions 24-26) *** CORRECT POSITION ***
+      0x33, 0x34, 0x35,        // Button 10 (positions 27-29)
+      0x33, 0x34, 0x35,        // Button 15 (positions 30-32)
+      0x33, 0x34, 0x35,        // Button 20 (positions 33-35)
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     
-    // Modify cmd3 for buttons that need it (like button 4, 5)
-    if (buttonNumber == 4) {
-      // Button 4 at position 10-12 in cmd3
-      cmd3[10] = r; cmd3[11] = g; cmd3[12] = b;
-    } else if (buttonNumber == 5) {
-      // Button 5 at position 25-27 in cmd3  
-      cmd3[25] = r; cmd3[26] = g; cmd3[27] = b;
+    // Override specific buttons in cmd3 with target colors
+    if (buttonNumber == 18) {
+      // Complete Button 18 GB components (only 2 bytes in cmd3)
+      cmd3[4] = g; cmd3[5] = b;  // Button 18 GB (positions 4-5)
+    } else if (buttonNumber == 23) {
+      cmd3[6] = r; cmd3[7] = g; cmd3[8] = b;     // Button 23 (positions 6-8)
+    } else if (buttonNumber == 4) {
+      cmd3[9] = r; cmd3[10] = g; cmd3[11] = b;   // Button 4 (positions 9-11)
+    } else if (buttonNumber == 9) {
+      cmd3[12] = r; cmd3[13] = g; cmd3[14] = b;  // Button 9 (positions 12-14)
+    } else if (buttonNumber == 14) {
+      cmd3[15] = r; cmd3[16] = g; cmd3[17] = b;  // Button 14 (positions 15-17)
+    } else if (buttonNumber == 19) {
+      cmd3[18] = r; cmd3[19] = g; cmd3[20] = b;  // Button 19 (positions 18-20)
+    } else if (buttonNumber == 24) {
+      cmd3[21] = r; cmd3[22] = g; cmd3[23] = b;  // Button 24 (positions 21-23)
+     } else if (buttonNumber == 5) {
+      cmd3[24] = r; cmd3[25] = g; cmd3[26] = b;  // Button 5 (positions 24-26) *** FIXED ***
+    } else if (buttonNumber == 10) {
+      cmd3[27] = r; cmd3[28] = g; cmd3[29] = b;  // Button 10 (positions 27-29)
+    } else if (buttonNumber == 15) {
+      cmd3[30] = r; cmd3[31] = g; cmd3[32] = b;  // Button 15 (positions 30-32)
+    } else if (buttonNumber == 20) {
+      cmd3[33] = r; cmd3[34] = g; cmd3[35] = b;  // Button 20 (positions 33-35)
     }
     
-    // Command 4: EXACT pattern from capture
+    // Commands 4 and 5: EXACT patterns from working capture
     uint8_t cmd4[64] = {
       0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -514,7 +567,6 @@ public:
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     
-    // Command 5: EXACT pattern from capture
     uint8_t cmd5[64] = {
       0x51, 0x28, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -522,9 +574,9 @@ public:
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     
-    Serial.printf("🎯 Sending EXACT 5-command sequence for button %d\n", buttonNumber);
+    Serial.printf("🎯 Sending COMPLETE LED state for button %d with all 24 buttons defined\n", buttonNumber);
     
-    // Send exact patterns with precise timing from USB capture
+    // Send the complete 5-command sequence
     Serial.println("📤 Command 1: Custom mode");
     int result1 = InterruptMessage(ctrl_ep_out, 64, cmd1, &send_cb);
     if (result1 != 0) {
@@ -533,7 +585,7 @@ public:
     }
     delay(12);
     
-    Serial.println("📤 Command 2: LED data package 1");
+    Serial.println("📤 Command 2: Complete LED state package 1");
     int result2 = InterruptMessage(ctrl_ep_out, 64, cmd2, &send_cb);
     if (result2 != 0) {
       Serial.printf("❌ Command 2 failed: %d\n", result2);
@@ -541,7 +593,7 @@ public:
     }
     delay(11);
     
-    Serial.println("📤 Command 3: LED data package 2");
+    Serial.println("📤 Command 3: Complete LED state package 2");
     int result3 = InterruptMessage(ctrl_ep_out, 64, cmd3, &send_cb);
     if (result3 != 0) {
       Serial.printf("❌ Command 3 failed: %d\n", result3);
@@ -564,7 +616,7 @@ public:
       return false;
     }
     
-    Serial.printf("✅ EXACT pattern sequence complete for button %d!\n", buttonNumber);
+    Serial.printf("✅ COMPLETE LED state sent - Button %d highlighted!\n", buttonNumber);
     return true;
   }
 
