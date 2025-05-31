@@ -2,6 +2,8 @@
 
 A **complete reverse-engineered USB host driver** for the **Cooler Master ControlPad** running on **Teensy 4.1**, enabling full individual button LED control and detection without requiring the official software.
 
+![controlpad](Images/button2_third_click.jpg)
+
 ![ControlPad](https://img.shields.io/badge/Device-Cooler%20Master%20ControlPad-blue)
 ![Teensy](https://img.shields.io/badge/Platform-Teensy%204.1-green)
 ![Status](https://img.shields.io/badge/Status-Advanced%20Working-brightgreen)
