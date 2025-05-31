@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <teensy4_usbhost.h>
+#include <string.h>  // For memset
 
 // ===== CONTROLPAD CONSTANTS =====
 #define CONTROLPAD_VID  0x2516
@@ -46,6 +47,10 @@ private:
   uint8_t ctrl_ep_in = 0x83;   // Control input endpoint
   uint8_t ctrl_ep_out = 0x04;  // Control output endpoint
   uint8_t ctrl_report[64] __attribute__((aligned(32)));
+  
+  // State buffers to hold full 25-button RGBW values for custom mode
+  uint8_t statePacket1[64];  // Buttons 1-13
+  uint8_t statePacket2[64];  // Buttons 14-25
   
   uint8_t report_len = 64;
   bool initialized = false;
@@ -662,44 +667,42 @@ public:
   }
   
   bool sendCommand(uint8_t cmd1, uint8_t cmd2, uint8_t* extraData = nullptr, size_t extraLen = 0) {
+    if (!initialized) {
+      Serial.println("❌ Device not initialized");
+      return false;
+    }
+    
     ControlPadPacket packet;
-    packet.vendor_id = 0x52;  // Keep old protocol for non-LED commands
     packet.cmd1 = cmd1;
     packet.cmd2 = cmd2;
     
-    // Copy any extra data
     if (extraData && extraLen > 0) {
       size_t copyLen = (extraLen > 61) ? 61 : extraLen;
       memcpy(packet.data, extraData, copyLen);
     }
     
-    // LED commands go to Interface 1 control OUT endpoint
-    Serial.printf("📤 Sending OLD command: 0x52 0x%02X 0x%02X to EP 0x%02X\n", cmd1, cmd2, ctrl_ep_out);
+    Serial.printf("📤 Sending cmd [%02X %02X] to EP 0x%02X\n", cmd1, cmd2, ctrl_ep_out);
     
-    // Add retry logic for LED commands
-    int maxRetries = 3;
-    for (int attempt = 0; attempt < maxRetries; attempt++) {
-      // Send via interrupt transfer to the LED control OUT endpoint
-      int result = InterruptMessage(ctrl_ep_out, 64, &packet, &send_cb);
-      if (result == 0) {
-        if (attempt > 0) {
-          Serial.printf("✅ OLD Command succeeded on attempt %d\n", attempt + 1);
-        } else {
-          Serial.println("✅ OLD Command queued successfully");
-        }
-        return true;
-      } else {
-        Serial.printf("⚠️ OLD Command attempt %d failed: %d\n", attempt + 1, result);
-        if (attempt < maxRetries - 1) {
-          delay(20);  // Wait before retry
-        }
-      }
+    // Use callback-based transfer
+    int result = InterruptMessage(ctrl_ep_out, 64, (uint8_t*)&packet, &send_cb);
+    
+    if (result != 0) {
+      Serial.printf("❌ Command failed with result: %d\n", result);
     }
     
-    Serial.printf("❌ OLD Command failed after %d attempts\n", maxRetries);
-    return false;
+    return (result == 0);
   }
-  
+
+  // Helper function for sending raw control data
+  int sendControlData(uint8_t* data, size_t length) {
+    if (length > 64) {
+      Serial.printf("❌ Data too large: %d bytes (max 64)\n", length);
+      return -2;
+    }
+    Serial.printf("📤 Sending %d bytes to EP 0x%02X\n", length, ctrl_ep_out);
+    return InterruptMessage(ctrl_ep_out, length, data, &send_cb);
+  }
+
   bool checkDeviceHealth() {
     Serial.println("🔍 Checking device health...");
     
@@ -786,76 +789,99 @@ public:
     }
   }
   
-  bool initializeDevice() {
-    Serial.println("\n🔥 === ENHANCED CONTROLPAD INITIALIZATION === 🔥");
+  bool initializeProfiles() {
+    Serial.println("🎮 INITIALIZING DEVICE PROFILES...");
     
-    // Extended initialization based on USB captures
-    Serial.println("📡 Phase 1: Device Reset & Mode Setup");
-    sendCommand(0x00, 0x00);  // Reset
-    delay(100);
-    
-    sendCommand(0x01, 0x03);  // Device configuration
-    delay(50);
-    
-    sendCommand(0x28, 0x00);  // Mode setup
-    delay(50);
-    
-    uint8_t modeData[] = {0x04, 0x00, 0x00};
-    sendCommand(0x28, 0x00, modeData, 3);  // Enhanced mode setup
-    delay(100);
-    
-    // Phase 2: Complete key mapping sequence
-    Serial.println("📡 Phase 2: Complete Key Mapping");
-    uint8_t keySequence[][2] = {
-      {0x20, 0x35}, {0x20, 0x1E}, {0x20, 0x1F}, {0x20, 0x20}, {0x20, 0x21}, {0x20, 0x22},
-      {0x20, 0x14}, {0x20, 0x1A}, {0x20, 0x08}, {0x20, 0x15}, {0x20, 0x17}, 
-      {0x20, 0x04}, {0x20, 0x16}, {0x20, 0x07}, {0x20, 0x09}, {0x20, 0x0A},
-      {0x20, 0x1D}, {0x20, 0x1B}, {0x20, 0x06}, {0x20, 0x19}, {0x20, 0x05}
-    };
-    
-    for (size_t i = 0; i < sizeof(keySequence) / sizeof(keySequence[0]); i++) {
-      sendCommand(keySequence[i][0], keySequence[i][1]);
-      delay(20);
-    }
-    
-    // Phase 3: Enhanced LED initialization 
-    Serial.println("📡 Phase 3: Enhanced LED Initialization");
-    
-    // Global LED setup
-    sendCommand(0x18, 0x00);
-    delay(50);
-    uint8_t globalLED[] = {0xFF, 0x3F, 0x00, 0x00};
-    sendCommand(0x18, 0x00, globalLED, 4);
-    delay(50);
-    
-    // Initialize all LED positions
-    for (int led = 1; led <= 25; led++) {
-      sendCommand(0x18, led);
-      delay(10);
+    // Profile enumeration sequence from working capture: 0x52 0x80 0x00-0x17
+    // This appears to be required before LED control becomes functional
+    for (uint8_t profile = 0x00; profile <= 0x17; profile++) {
+      uint8_t profileCmd[64] = {0};
+      profileCmd[0] = 0x52;
+      profileCmd[1] = 0x80;
+      profileCmd[2] = profile;
       
-      uint8_t ledInit[] = {0xFF, 0x3F, 0x00, 0x00};
-      sendCommand(0x18, led, ledInit, 4);
-      delay(10);
+      Serial.printf("📋 Setting profile %02X...\n", profile);
+      sendControlData(profileCmd, 64);
+      delay(10); // Small delay between profile commands
     }
     
-    // Final LED mode setup
-    uint8_t finalMode[] = {0x01, 0x00, 0x00, 0xFF};
-    sendCommand(0x1C, 0x01, finalMode, 4);
+    Serial.println("✅ Profile initialization complete");
+    return true;
+  }
+
+  bool initializeDevice() {
+    if (initialized) return true;
+    
+    Serial.println("🔧 INITIALIZING CONTROLPAD DEVICE...");
+    
+    if (!checkDeviceHealth()) {
+      Serial.println("❌ Device health check failed");
+      return false;
+    }
+    
+    // Start dual interface polling first
+    startDualPolling();
     delay(100);
     
+    // CRITICAL: Device initialization commands (from working capture)
+    Serial.println("🔧 Sending device initialization commands...");
+    
+    // Command 1: 42000000010000010000...
+    uint8_t initCmd1[64] = {0};
+    initCmd1[0] = 0x42; initCmd1[1] = 0x00; initCmd1[2] = 0x00; initCmd1[3] = 0x00;
+    initCmd1[4] = 0x01; initCmd1[5] = 0x00; initCmd1[6] = 0x00; initCmd1[7] = 0x01;
+    sendControlData(initCmd1, 64);
+    delay(20);
+    
+    // Command 2: 42100000010000010000...
+    uint8_t initCmd2[64] = {0};
+    initCmd2[0] = 0x42; initCmd2[1] = 0x10; initCmd2[2] = 0x00; initCmd2[3] = 0x00;
+    initCmd2[4] = 0x01; initCmd2[5] = 0x00; initCmd2[6] = 0x00; initCmd2[7] = 0x01;
+    sendControlData(initCmd2, 64);
+    delay(20);
+    
+    // Command 3: 43000000010000000000...
+    uint8_t initCmd3[64] = {0};
+    initCmd3[0] = 0x43; initCmd3[1] = 0x00; initCmd3[2] = 0x00; initCmd3[3] = 0x00;
+    initCmd3[4] = 0x01; initCmd3[5] = 0x00; initCmd3[6] = 0x00; initCmd3[7] = 0x00;
+    sendControlData(initCmd3, 64);
+    delay(20);
+    
+    // Commit initialization
+    sendCommitCommand();
+    delay(50);
+
+    // CRITICAL: Initialize profiles first (required for LED control)
+    Serial.println("🎮 Initializing device profiles...");
+    if (!initializeProfiles()) {
+      Serial.println("❌ Failed to initialize profiles");
+      return false;
+    }
+    delay(100);
+    
+    // Set to custom mode for LED control
+    Serial.println("🎨 Setting device to CUSTOM MODE for LED control...");
+    if (!switchToCustomMode()) {
+      Serial.println("❌ Failed to switch to custom mode");
+      return false;
+    }
+    delay(100);
+    
+    // Initialize state buffers with exact headers from working capture
+    memset(statePacket1, 0, sizeof(statePacket1));
+    memset(statePacket2, 0, sizeof(statePacket2));
+    
+    // Packet 1: 568300000100000080010000...RGB data... 
+    statePacket1[0]=0x56; statePacket1[1]=0x83; statePacket1[2]=0x00; statePacket1[3]=0x00;
+    statePacket1[4]=0x01; statePacket1[5]=0x00; statePacket1[6]=0x00; statePacket1[7]=0x00;
+    statePacket1[8]=0x80; statePacket1[9]=0x01; statePacket1[10]=0x00; statePacket1[11]=0x00;
+    
+    // Packet 2: 56830100...RGB data...
+    statePacket2[0]=0x56; statePacket2[1]=0x83; statePacket2[2]=0x01; statePacket2[3]=0x00;
     initialized = true;
-    Serial.println("✅ Enhanced ControlPad initialization complete!");
     
-    // Test with a quick color flash
-    Serial.println("🌈 Testing with rainbow flash...");
-    setLEDs(255, 0, 0);    // Red
-    delay(500);
-    setLEDs(0, 255, 0);    // Green  
-    delay(500);
-    setLEDs(0, 0, 255);    // Blue
-    delay(500);
-    setLEDs(0, 0, 0);      // Off
-    
+    Serial.println("✅ ControlPad device initialized successfully");
+    Serial.println("🎯 Ready for LED commands!");
     return true;
   }
   
@@ -897,65 +923,58 @@ public:
         }
         Serial.println();
         
-        // DIRECT PROCESSING: Bypass broken queue and process immediately
-        uint8_t key = kbd_report[2];
-        if (key != 0 && key < 0x80) {
-          Serial.printf("🚀 DIRECT PROCESSING: Key 0x%02X detected, calling LED command immediately!\n", key);
-          Serial.printf("🔍 Key mapping: ");
-          switch(key) {
-            case 0x1E: Serial.printf("'1' (Button 1)\n"); break;
-            case 0x1F: Serial.printf("'2' (Button 2)\n"); break;
-            case 0x20: Serial.printf("'3' (Button 3)\n"); break;
-            case 0x21: Serial.printf("'4' (Button 4)\n"); break;
-            case 0x22: Serial.printf("'5' (Button 5)\n"); break;
-            case 0x23: Serial.printf("'6' (Button 6)\n"); break;
-            default: Serial.printf("Unknown button (0x%02X)\n", key); break;
+        // Process keys directly in polling callback (bypass broken queue)
+        if (event.len >= 8) {
+          // Map USB scan codes to our button numbering
+          uint8_t scanCode = event.data[2];
+          int buttonNumber = 0;
+          
+          switch (scanCode) {
+            case 0x1E: buttonNumber = 1; break;  // '1'
+            case 0x1F: buttonNumber = 2; break;  // '2'
+            case 0x20: buttonNumber = 3; break;  // '3'
+            case 0x21: buttonNumber = 4; break;  // '4'
+            case 0x22: buttonNumber = 5; break;  // '5'
+            case 0x23: buttonNumber = 6; break;  // '6'
+            default:
+              Serial.printf("🔍 Unmapped key: 0x%02X\n", scanCode);
+              buttonNumber = 0;
+              break;
           }
           
-          // Get the global driver instance and call LED command directly
-          extern USBControlPad* controlPadDriver;
-          if (controlPadDriver) {
-            Serial.println("✅ Calling LED command directly from kbd_poll!");
+          if (buttonNumber > 0) {
+            Serial.printf("🎯 BUTTON %d PRESSED! Processing LED command...\n", buttonNumber);
             
-            // Send DIFFERENT patterns for each button to see which one works
-            switch(key) {
-              case 0x1E: // Button 1 - Red (original working pattern)
-                Serial.println("🔴 Button 1: Sending RED pattern");
-                controlPadDriver->sendExactLEDCommand();
+            // Use exact colors from USB capture
+            switch (buttonNumber) {
+              case 1:
+                // Red - try both button 1 and button 12 to test indexing
+                Serial.println("🔴 Testing button 1 -> trying LED button 1 AND 12");
+                sendRealLEDCommand(1, 0xFF, 0x00, 0x00);  // Try button 1
+                delay(100);
+                sendRealLEDCommand(12, 0xFF, 0x00, 0x00); // Try button 12
                 break;
-                
-              case 0x1F: // Button 2 - Try green  
-                Serial.println("🟢 Button 2: Sending GREEN pattern");
-                controlPadDriver->sendGreenPattern();
+              case 2:
+                // Green  
+                sendRealLEDCommand(2, 0x00, 0xFF, 0x00);
                 break;
-                
-              case 0x20: // Button 3 - Try blue
-                Serial.println("🔵 Button 3: Sending BLUE pattern");
-                controlPadDriver->sendBluePattern();
+              case 3:
+                // Blue
+                sendRealLEDCommand(3, 0x00, 0x00, 0xFF);
                 break;
-                
-              case 0x21: // Button 4 - Try yellow
-                Serial.println("🟡 Button 4: Sending YELLOW pattern");
-                controlPadDriver->sendYellowPattern();
+              case 4:
+                // Purple (exact from capture: d7 52 ff)
+                sendRealLEDCommand(4, 0xD7, 0x52, 0xFF);
                 break;
-                
-              case 0x22: // Button 5 - Try purple
-                Serial.println("🟣 Button 5: Sending PURPLE pattern");
-                controlPadDriver->sendPurplePattern();
+              case 5:
+                // Yellow
+                sendRealLEDCommand(5, 0xFF, 0xFF, 0x00);
                 break;
-                
-              case 0x23: // Button 6 - Try white
-                Serial.println("⚪ Button 6: Sending WHITE pattern");
-                controlPadDriver->sendWhitePattern();
-                break;
-                
-              default:
-                Serial.println("🔴 Unknown button: Sending default RED pattern");
-                controlPadDriver->sendExactLEDCommand();
+              case 6:
+                // Grey (exact from capture: 80 80 80)
+                sendRealLEDCommand(6, 0x80, 0x80, 0x80);
                 break;
             }
-          } else {
-            Serial.println("❌ No controlPadDriver available in direct processing!");
           }
         }
       }
@@ -1104,6 +1123,251 @@ public:
       }
     }
   }
+
+  bool sendRealLEDCommand(uint8_t buttonIndex, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0) {
+    Serial.printf("🎯 REAL LED COMMAND: Button %d -> RGB(%d,%d,%d)\n", buttonIndex, r, g, b);
+
+    if (buttonIndex < 1 || buttonIndex > 25) {
+      Serial.printf("❌ Invalid button index: %d\n", buttonIndex);
+      return false;
+    }
+
+    // Column-based mapping: button1, button6, button11, button16, button21, button2, button7, etc.
+    // 5x5 grid arranged by columns: [1,6,11,16,21], [2,7,12,17,22], [3,8,13,18,23], [4,9,14,19,24], [5,10,15,20,25]
+    uint8_t idx = buttonIndex - 1;  // 0-based index
+    uint8_t row = idx % 5;          // Row within column (0-4)
+    uint8_t col = idx / 5;          // Column number (0-4) 
+    uint8_t pos = row * 5 + col;    // Column-major position
+    
+    Serial.printf("🗺️ Button %d -> row=%d, col=%d, pos=%d\n", buttonIndex, row, col, pos);
+
+    // Switch to custom mode if not already done
+    switchToCustomMode();
+    delay(20);
+    
+    // Update full LED state buffers at the mapped position (RGB, no white)
+    if (pos < 13) {
+      size_t off = 12 + pos * 3;
+      statePacket1[off]     = r;
+      statePacket1[off + 1] = g;
+      statePacket1[off + 2] = b;
+      Serial.printf("📦 Packet1[%d:%d] = RGB(%d,%d,%d)\n", off, off+2, r, g, b);
+    } else {
+      size_t off = 4 + (pos - 13) * 3;
+      statePacket2[off]     = r;
+      statePacket2[off + 1] = g;
+      statePacket2[off + 2] = b;
+      Serial.printf("📦 Packet2[%d:%d] = RGB(%d,%d,%d)\n", off, off+2, r, g, b);
+    }
+    // Send full-state packets to apply LED changes
+    Serial.println("📤 Sending LED state packets...");
+    sendControlData(statePacket1, 64);
+    delay(10);
+    sendControlData(statePacket2, 64);
+    delay(10);
+    
+    // CRITICAL: Send commit command to apply changes  
+    sendCommitCommand();
+    
+    return true;
+  }
+
+  // Switch to static mode
+  bool switchToStaticMode() {
+    Serial.println("🔧 SWITCHING TO STATIC MODE...");
+    // Payload from capture: frame15353 static (offset8=0x02, then background pattern)
+    static const uint8_t modeStatic[64] = {
+      0x56, 0x81, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+      0x02, 0x00, 0x00, 0x00,
+      0x55, 0x55, 0x55, 0x55
+    };
+    Serial.println("📤 Sending STATIC MODE via interrupt...");
+    sendControlData((uint8_t*)modeStatic, 64);
+    delay(50);
+    return true;
+  }
+
+  // Switch to custom mode
+  bool switchToCustomMode() {
+    Serial.println("🔧 SWITCHING TO CUSTOM MODE...");
+    // Exact payload from working capture: 568100000100000002000000bbbbbbbb...
+    static const uint8_t modeCustom[64] = {
+      0x56, 0x81, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+      0x02, 0x00, 0x00, 0x00,
+      0xbb, 0xbb, 0xbb, 0xbb,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    Serial.println("📤 Sending CUSTOM MODE via interrupt...");
+    sendControlData((uint8_t*)modeCustom, 64);
+    delay(50);
+    return true;
+  }
+
+  // Add demo helper to set all LEDs at once
+  void setAllLEDs(uint8_t r, uint8_t g, uint8_t b) {
+    Serial.printf("☑️ Setting ALL LEDs to RGB(%d,%d,%d)\n", r, g, b);
+    if (!initialized) initializeDevice();
+    
+    // Ensure we're in custom mode
+    switchToCustomMode();
+    delay(20);
+    
+    // Update full state buffers for all 25 buttons using corrected column-based mapping
+    for (uint8_t button = 1; button <= 25; button++) {
+      uint8_t idx = button - 1;       // 0-based index
+      uint8_t row = idx % 5;          // Row within column (0-4)
+      uint8_t col = idx / 5;          // Column number (0-4) 
+      uint8_t pos = row * 5 + col;    // Column-major position
+      
+      if (pos < 13) {
+        size_t off = 12 + pos * 3;
+        statePacket1[off]     = r;
+        statePacket1[off + 1] = g;
+        statePacket1[off + 2] = b;
+      } else {
+        size_t off = 4 + (pos - 13) * 3;
+        statePacket2[off]     = r;
+        statePacket2[off + 1] = g;
+        statePacket2[off + 2] = b;
+      }
+    }
+    
+    // Send updated full-state packets
+    Serial.println("📤 Sending ALL LED state packets...");
+    Serial.print("📦 Packet1 header: ");
+    for (int i = 0; i < 12; i++) {
+      Serial.printf("%02X ", statePacket1[i]);
+    }
+    Serial.println();
+    
+    sendControlData(statePacket1, 64);
+    delay(20);
+    sendControlData(statePacket2, 64);
+    delay(20);
+    
+    // CRITICAL: Send commit command to apply LED changes
+    sendCommitCommand();
+  }
+
+  // Test function to set specific button to red (matching working capture)
+  bool testButton1Red() {
+    Serial.println("🧪 TESTING: Setting Button 1 to RED (matching working capture)");
+    
+    if (!initialized) initializeDevice();
+    
+    // Clear all LEDs first
+    memset(statePacket1 + 12, 0, 52);  // Clear RGB data in packet1 
+    memset(statePacket2 + 4, 0, 60);   // Clear RGB data in packet2
+    
+    // Set button 1 to red - should be position 0 (bytes 12-14 in packet1)
+    statePacket1[12] = 0xFF;  // Red
+    statePacket1[13] = 0x00;  // Green
+    statePacket1[14] = 0x00;  // Blue
+    
+    Serial.println("📤 Sending test LED command...");
+    Serial.print("📦 Packet1 first 20 bytes: ");
+    for (int i = 0; i < 20; i++) {
+      Serial.printf("%02X ", statePacket1[i]);
+    }
+    Serial.println();
+    
+    sendControlData(statePacket1, 64);
+    delay(20);
+    sendControlData(statePacket2, 64);
+    delay(20);
+    
+    // CRITICAL: Send commit command to apply changes
+    sendCommitCommand();
+    
+    return true;
+  }
+
+  // Send commit command to apply LED changes (0x41 0x80 from working capture)
+  bool sendCommitCommand() {
+    uint8_t commitCmd[64] = {0};
+    commitCmd[0] = 0x41;
+    commitCmd[1] = 0x80;
+    // Rest stays zero
+    
+    Serial.println("💾 Sending COMMIT command to apply LED changes...");
+    sendControlData(commitCmd, 64);
+    delay(10);
+    return true;
+  }
+
+  // Test function to replicate exact working pattern from capture
+  bool testExactWorkingPattern() {
+    Serial.println("🔥 TESTING: Exact working pattern from USB capture");
+    
+    if (!initialized) initializeDevice();
+    
+    // Clear packets first
+    memset(statePacket1 + 12, 0, 52);
+    memset(statePacket2 + 4, 0, 60);
+    
+    // Packet 1 RGB data from working capture: ff0000000000ffff0000000000ffff00ffff00ffff00ffff00ffff00ffffffff00ffff00ffff000000ff00ffffffff00ffff00ff
+    uint8_t workingData1[] = {
+      0xff, 0x00, 0x00,  // Red
+      0x00, 0x00, 0x00,  // Black  
+      0xff, 0xff, 0x00,  // Yellow
+      0x00, 0x00, 0x00,  // Black
+      0x00, 0x00, 0xff,  // Blue
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0xff, 0xff,  // White
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0x00, 0x00, 0x00,  // Black
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0xff, 0xff,  // White
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff   // Magenta
+    };
+    
+    // Packet 2 RGB data from working capture: ff00d752ff00ffffffff00ffff00ffff00ff000000ffffffff0000ff00ffff00000000...
+    uint8_t workingData2[] = {
+      0xff, 0x00, 0xd7,  // Magenta-ish
+      0x52, 0xff, 0x00,  // Green-ish
+      0xff, 0xff, 0xff,  // White
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0xff,  // Magenta
+      0x00, 0x00, 0x00,  // Black
+      0xff, 0xff, 0xff,  // White
+      0xff, 0x00, 0x00,  // Red
+      0xff, 0x00, 0xff,  // Magenta
+      0xff, 0x00, 0x00,  // Red
+      0x00, 0x00, 0x00   // Black
+    };
+    
+    // Copy exact working patterns  
+    memcpy(statePacket1 + 12, workingData1, sizeof(workingData1));
+    memcpy(statePacket2 + 4, workingData2, sizeof(workingData2));
+    
+    Serial.println("📤 Sending EXACT working LED pattern...");
+    Serial.print("📦 Packet1 data: ");
+    for (int i = 12; i < 30; i++) {
+      Serial.printf("%02X ", statePacket1[i]);
+    }
+    Serial.println();
+    
+    sendControlData(statePacket1, 64);
+    delay(20);
+    sendControlData(statePacket2, 64);
+    delay(20);
+    sendCommitCommand();
+    
+    return true;
+  }
 };
 
 // Static variable definition
@@ -1142,87 +1406,27 @@ void setup() {
 }
 
 void loop() {
-  // Process USB events - use Task from atom library 
-  // (no usbHost.Task() needed with teensy4_usbhost)
+  static bool firstRun = true;
+  static unsigned long lastTime = 0;
+  static bool toggle = false;
   
-  // Rate limiting for main loop to prevent overwhelming the system
-  static unsigned long lastLoopTime = 0;
-  if (millis() - lastLoopTime < 20) {  // 50Hz update rate
-    return;
-  }
-  lastLoopTime = millis();
-  
-  // Check and restart polling if needed
-  if (controlPadDriver) {
-    static unsigned long lastPollCheck = 0;
-    if (millis() - lastPollCheck > 1000) {  // Check every second
-      if (!controlPadDriver->kbd_polling) {
-        Serial.println("🔄 Restarting keyboard polling...");
-        controlPadDriver->restartKeyboardPolling();
-      }
-      if (!controlPadDriver->ctrl_polling) {
-        Serial.println("🔄 Restarting control polling...");
-        controlPadDriver->restartControlPolling();
-      }
-      lastPollCheck = millis();
-    }
-  }
-  
-  // Process any pending controlpad events from the queue
-  controlpad_event event;
-  if (atomQueueGet(&controlpad_queue, 0, &event) == ATOM_OK) {
-    Serial.printf("📥 QUEUE EVENT RETRIEVED: len=%d\n", event.len);
-    // Distinguish between keyboard events (8 bytes) and control events (64 bytes)
-    if (event.len == 8) {
-      Serial.println("🎹 PROCESSING 8-byte KEYBOARD event from queue");
-      // Standard HID keyboard event from Interface 0
-      if (event.data[2] != 0 && event.data[2] < 0x80) {
-        uint8_t key = event.data[2];
-        Serial.printf("⌨️ KEYBOARD Key Press: 0x%02X (%d) - Interface 0\n", key, key);
-        
-        // Add debugging for key detection
-        Serial.printf("🔍 === KEY DETECTION DEBUG ===\n");
-        Serial.printf("   Key code detected: 0x%02X (%d)\n", key, key);
-        Serial.printf("   Key name mapping: ");
-        switch(key) {
-          case 0x1E: Serial.printf("'1' (Button 1)\n"); break;
-          case 0x1F: Serial.printf("'2' (Button 2)\n"); break;
-          case 0x20: Serial.printf("'3' (Button 3)\n"); break;
-          case 0x21: Serial.printf("'4' (Button 4)\n"); break;
-          case 0x22: Serial.printf("'5' (Button 5)\n"); break;
-          case 0x23: Serial.printf("'6' (Button 6)\n"); break;
-          default: Serial.printf("Unknown button (0x%02X)\n", key); break;
-        }
-        
-        // Test different patterns based on which key is pressed
-        if (controlPadDriver) {
-          Serial.printf("🔥 KEY PRESSED: 0x%02X - Testing LED patterns!\n", key);
-          controlPadDriver->sendExactLEDCommand();
-        }
-      }
-    } else if (event.len == 64) {
-      // Control event from Interface 1 - reduce spam
-      static int controlEventCounter = 0;
-      if (++controlEventCounter % 20 == 1) {  // Show every 20th event
-        Serial.printf("🎮 CONTROL Event #%d: ", controlEventCounter);
-        for (int i = 0; i < min(8, (int)event.len); i++) {
-          Serial.printf("0x%02X ", event.data[i]);
-        }
-        Serial.println();
-      }
-    }
-  }
-  
-  // Test LED commands periodically (every 15 seconds)
-  static unsigned long lastLEDTest = 0;
-  if (millis() - lastLEDTest > 15000) {
+  if (firstRun) {
     if (controlPadDriver) {
-      Serial.println("\n🔴 Periodic LED test - RED...");
-      controlPadDriver->setLEDs(255, 0, 0);
-    } else {
-      Serial.println("\n⚠️ No controlPadDriver instance - factory system may not be working");
-      Serial.printf("Factory registered: %s\n", USBControlPad::factory_registered ? "YES" : "NO");
+      controlPadDriver->initializeDevice();
+      delay(500); // Give device time to settle after initialization
     }
-    lastLEDTest = millis();
+    firstRun = false;
+  }
+  
+  if (millis() - lastTime > 3000) {
+    lastTime = millis();
+    if (toggle) {
+      Serial.println("🔥 TESTING: Exact working pattern");
+      if (controlPadDriver) controlPadDriver->testExactWorkingPattern();
+    } else {
+      Serial.println("🔵 DEMO: All BLUE");
+      if (controlPadDriver) controlPadDriver->setAllLEDs(0, 0, 255);
+    }
+    toggle = !toggle;
   }
 } 
