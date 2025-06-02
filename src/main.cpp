@@ -883,9 +883,9 @@ public:
     InterruptMessage(ctrl_ep_out, 64, cmd4, &send_cb); delay(50);
     InterruptMessage(ctrl_ep_out, 64, cmd5, &send_cb);
     
-    return true;
-  }
-
+      return true;
+    }
+    
   bool sendButtonSpecificRed(uint8_t buttonIndex) {
     Serial.printf("🔴 Sending RED to specific button %d (5 steps)\n", buttonIndex);
     
@@ -944,7 +944,7 @@ public:
     Serial.printf("🔄 RED Step 5: Final red command\n");
     InterruptMessage(ctrl_ep_out, 64, cmd5, &send_cb);
     
-    return true;
+      return true;
   }
 
   bool sendLEDCommand(uint8_t ledIndex, uint8_t r, uint8_t g, uint8_t b) {
@@ -1115,7 +1115,7 @@ public:
     Serial.printf("📤 Sending %d bytes to EP 0x%02X\n", length, ctrl_ep_out);
     return InterruptMessage(ctrl_ep_out, length, data, &send_cb);
   }
-
+  
   bool checkDeviceHealth() {
     Serial.println("🔍 Checking device health...");
     
@@ -1244,7 +1244,7 @@ public:
     initCmd1[0] = 0x42; initCmd1[1] = 0x00; initCmd1[2] = 0x00; initCmd1[3] = 0x00;
     initCmd1[4] = 0x01; initCmd1[5] = 0x00; initCmd1[6] = 0x00; initCmd1[7] = 0x01;
     sendControlData(initCmd1, 64);
-    delay(20);
+      delay(20);
     
     // Command 2: 42100000010000010000...
     uint8_t initCmd2[64] = {0};
@@ -1263,7 +1263,7 @@ public:
     // Commit initialization
     sendCommitCommand();
     delay(50);
-
+    
     // CRITICAL: Initialize profiles first (required for LED control)
     Serial.println("🎮 Initializing device profiles...");
     if (!initializeProfiles()) {
