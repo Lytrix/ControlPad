@@ -286,3 +286,46 @@ Contributions are welcome! This project has achieved major milestones but there'
 **⭐ If this reverse engineering work helped you, please give it a star on GitHub!** 
 
 *This project represents hundreds of hours of USB protocol analysis, reverse engineering, and embedded development to achieve complete ControlPad LED control.* 
+
+# ControlPad Library
+
+A reusable Arduino/Teensy library for Cooler Master ControlPad USB keypads.
+
+## Features
+- Button state polling
+- Hall sensor value reading
+- Per-button RGB LED control (with internal state)
+- Designed for easy integration with projects like MidiLooper
+
+## Usage Example
+```cpp
+#include <ControlPad.h>
+
+ControlPad pad;
+
+void setup() {
+    pad.begin();
+}
+
+void loop() {
+    pad.poll();
+    if (pad.getButtonState(0)) {
+        pad.setLed(0, 255, 0, 0); // Red
+    } else {
+        pad.setLed(0, 0, 0, 0);   // Off
+    }
+    pad.updateLeds();
+}
+```
+
+## API
+- `bool begin();` — Initialize the device
+- `void poll();` — Poll for button/hall events
+- `bool getButtonState(uint8_t button) const;`
+- `int getHallValue(uint8_t sensor) const;`
+- `void setLed(uint8_t button, uint8_t r, uint8_t g, uint8_t b);`
+- `void setAllLeds(const ControlPadColor colors[CONTROLPAD_NUM_BUTTONS]);`
+- `void updateLeds();`
+
+## License
+MIT or PolyForm Noncommercial 1.0.0 (choose as appropriate)
