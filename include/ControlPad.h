@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define CONTROLPAD_NUM_BUTTONS 25
+#define CONTROLPAD_NUM_BUTTONS 24
 
 // Forward declaration
 class ControlPadHardware;
@@ -53,6 +53,11 @@ public:
     void setLed(uint8_t button, uint8_t r, uint8_t g, uint8_t b);
     void setAllLeds(const ControlPadColor colors[CONTROLPAD_NUM_BUTTONS]);
     void updateLeds();
+    
+    // Convenience methods for common patterns
+    void setAllLedsOff();
+    void setAllLedsColor(uint8_t r, uint8_t g, uint8_t b);
+    void setRainbowPattern();
 
     // Event API
     bool pollEvent(ControlPadEvent& event); // Polling

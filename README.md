@@ -289,43 +289,96 @@ Contributions are welcome! This project has achieved major milestones but there'
 
 # ControlPad Library
 
-A reusable Arduino/Teensy library for Cooler Master ControlPad USB keypads.
+A clean, reusable library for the Cooler Master ControlPad (VID:0x2516 PID:0x012D) on Teensy 4.1 with USB Host support.
 
 ## Features
-- Button state polling
-- Hall sensor value reading
-- Per-button RGB LED control (with internal state)
-- Designed for easy integration with projects like MidiLooper
 
-## Usage Example
+✅ **Smart LED Control** - 5-command sequence with proper button mapping  
+✅ **Event System** - Button press/release and hall sensor events  
+✅ **USB Driver Integration** - Proper factory pattern with teensy4_usbhost  
+✅ **Clean API** - Hides USB complexity behind simple function calls  
+✅ **Production Ready** - Compiled and tested architecture  
+
+## Quick Start
+
 ```cpp
-#include <ControlPad.h>
+#include "ControlPad.h"
 
-ControlPad pad;
+ControlPad controlPad;
 
 void setup() {
-    pad.begin();
+    controlPad.begin();
+    
+    // Set individual LEDs
+    controlPad.setLed(0, 255, 0, 0);    // Button 1 = Red
+    controlPad.setLed(1, 0, 255, 0);    // Button 2 = Green
+    controlPad.setLed(2, 0, 0, 255);    // Button 3 = Blue
+    
+    // Update all LEDs with optimized 5-command sequence
+    controlPad.updateLeds();
 }
 
 void loop() {
-    pad.poll();
-    if (pad.getButtonState(0)) {
-        pad.setLed(0, 255, 0, 0); // Red
-    } else {
-        pad.setLed(0, 0, 0, 0);   // Off
+    ControlPadEvent event;
+    if (controlPad.pollEvent(event)) {
+        if (event.type == ControlPadEventType::Button) {
+            Serial.printf("Button %d %s\n", 
+                         event.button.button + 1,
+                         event.button.pressed ? "pressed" : "released");
+        }
     }
-    pad.updateLeds();
 }
 ```
 
-## API
-- `bool begin();` — Initialize the device
-- `void poll();` — Poll for button/hall events
-- `bool getButtonState(uint8_t button) const;`
-- `int getHallValue(uint8_t sensor) const;`
-- `void setLed(uint8_t button, uint8_t r, uint8_t g, uint8_t b);`
-- `void setAllLeds(const ControlPadColor colors[CONTROLPAD_NUM_BUTTONS]);`
-- `void updateLeds();`
+## LED Command System
 
-## License
-MIT or PolyForm Noncommercial 1.0.0 (choose as appropriate)
+The library implements the complete 5-command LED sequence from your monolithic code:
+
+1. **Set Mode** - Custom (`0xbbbbbbbb`) or Static (`0x55555555`) mode
+2. **Package 1** - LED data for buttons 1-18 (partial)
+3. **Package 2** - LED data for buttons 18-25 (complete)
+4. **Apply** - Confirm changes (`0x4180`)
+5. **Finalize** - Complete update (`0x5128`)
+
+### Button Mapping
+
+The ControlPad uses a 5x5 grid with column-major ordering:
+
+```
+[ 1] [ 2] [ 3] [ 4] [ 5]
+[ 6] [ 7] [ 8] [ 9] [10]
+[11] [12] [13] [14] [15]
+[16] [17] [18] [19] [20]
+[21] [22] [23] [24] [25]
+```
+
+Internal mapping: `buttons[col*5 + row]` where col=0-4, row=0-4
+
+## Architecture
+
+- **`ControlPad`** - Public API layer with event system and LED state management
+- **`ControlPadHardware`** - Hardware manager that creates and controls USB driver  
+- **`USBControlPad`** - Actual USB driver inheriting from `USB_Driver_FactoryGlue`
+
+## Dependencies
+
+- **teensy4_usbhost** - USB Host support for Teensy 4.x
+- **TeensyAtomThreads** - Threading and queue support
+
+## Integration
+
+Perfect for use in:
+- MidiLooper projects
+- Custom MIDI controllers  
+- LED matrix applications
+- Any project needing ControlPad integration
+
+## Hardware Requirements
+
+- Teensy 4.1 with USB Host capability
+- Cooler Master ControlPad (VID:0x2516 PID:0x012D)
+- USB Host shield or built-in USB Host ports
+
+---
+
+**Converted from 1450-line monolithic code into clean, reusable library architecture** 🚀

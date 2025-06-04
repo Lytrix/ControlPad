@@ -39,7 +39,7 @@ USB_Driver* USBControlPad::attach_interface(const usb_interface_descriptor* ifac
     Serial.println("🎯 *** USBControlPad::attach_interface called ***");
     Serial.printf("   Attaching to Interface: %d\n", iface->bInterfaceNumber);
     
-    // Create driver instance only once
+    // Create driver instance only once - but don't start polling yet
     if (!driver_instance_created) {
         driver_instance_created = true;
         
@@ -70,6 +70,14 @@ void USBControlPad::detach() {
     dual_polling = false;
     hall_sensor_polling = false;
     sensor_out_polling = false;
+    
+    // Reset static variable so a new driver can be created on reconnect
+    driver_instance_created = false;
+    
+    // Clear global pointer
+    if (controlPadDriver == this) {
+        controlPadDriver = nullptr;
+    }
 }
 
 bool USBControlPad::begin(ATOM_QUEUE *q) {
@@ -97,70 +105,47 @@ void USBControlPad::setupQuadInterface() {
 }
 
 void USBControlPad::startQuadPolling() {
-    Serial.println("🔄 Starting QUAD INTERFACE polling...");
+    Serial.println("🔄 Starting CONSERVATIVE endpoint polling...");
     
-    // Start polling Interface 0 (Keyboard - 8 byte packets)
-    Serial.printf("📡 Starting keyboard polling on EP 0x%02X...\n", kbd_ep_in);
-    if (InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb) == 0) {
-        kbd_polling = true;
-        Serial.println("✅ Keyboard polling started successfully");
-    } else {
-        Serial.println("❌ Failed to start keyboard polling");
-    }
+    // Start with only the most essential endpoints first
     
-    delay(10);
-    
-    // Start polling Interface 1 Control (64 byte packets) - MOST IMPORTANT
+    // Start polling Interface 1 Control (64 byte packets) - MOST IMPORTANT FOR BUTTONS
     Serial.printf("📡 Starting control polling on EP 0x%02X...\n", ctrl_ep_in);
     if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) == 0) {
         ctrl_polling = true;
         Serial.println("✅ Control polling started successfully");
     } else {
         Serial.println("❌ Failed to start control polling");
+        return; // Don't continue if this critical endpoint fails
     }
     
-    delay(10);
+    delay(100); // Longer delay between endpoint starts
     
-    // Start polling Interface 2 Dual (64 byte packets)
-    Serial.printf("📡 Starting dual polling on EP 0x%02X...\n", dual_ep_in);
-    if (InterruptMessage(dual_ep_in, 64, dual_report, &dual_poll_cb) == 0) {
-        dual_polling = true;
-        Serial.println("✅ Dual polling started successfully");
+    // Start polling Interface 0 (Keyboard - 8 byte packets) - SECONDARY PRIORITY
+    Serial.printf("📡 Starting keyboard polling on EP 0x%02X...\n", kbd_ep_in);
+    if (InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb) == 0) {
+        kbd_polling = true;
+        Serial.println("✅ Keyboard polling started successfully");
     } else {
-        Serial.println("❌ Failed to start dual polling");
+        Serial.println("⚠️ Keyboard polling failed - continuing without it");
     }
     
-    delay(10);
+    delay(100);
     
-    // Start polling Interface 3 Button (32 byte packets)
-    Serial.printf("📡 Starting hall sensor polling on EP 0x%02X...\n", hall_sensor_ep_in);
-    if (InterruptMessage(hall_sensor_ep_in, 32, hall_sensor_report, &hall_sensor_poll_cb) == 0) {
-        hall_sensor_polling = true;
-        Serial.println("✅ Hall sensor polling started successfully");
-    } else {
-        Serial.println("❌ Failed to start hall sensor polling");
-    }
-    
-    delay(10);
-    
-    // Start polling Interface 3 Button Output (32 byte packets)
-    Serial.printf("📡 Starting button output polling on EP 0x%02X...\n", btn_ep_out);
-    if (InterruptMessage(btn_ep_out, 32, sensor_out_report, &sensor_out_poll_cb) == 0) {
-        sensor_out_polling = true;
-        Serial.println("✅ Button output polling started successfully");
-    } else {
-        Serial.println("❌ Failed to start button output polling");
-    }
-    
-    delay(50);
+    Serial.println("🎯 Essential endpoints started - additional endpoints disabled for bandwidth");
+    Serial.println("   (Dual action and hall sensor endpoints can be added later if needed)");
     
     // Report polling status
-    Serial.printf("📊 Polling Status: kbd=%s, ctrl=%s, dual=%s, btn=%s, sensor_out=%s\n",
+    Serial.printf("📊 Conservative Polling Status: kbd=%s, ctrl=%s\n",
                   kbd_polling ? "✅" : "❌",
-                  ctrl_polling ? "✅" : "❌", 
-                  dual_polling ? "✅" : "❌",
-                  hall_sensor_polling ? "✅" : "❌",
-                  sensor_out_polling ? "✅" : "❌");
+                  ctrl_polling ? "✅" : "❌");
+    
+    if (ctrl_polling) {
+        Serial.println("🎯 Control endpoint is polling! Device should now send button events!");
+        Serial.println("🔥 Try pressing buttons now - should see real button events!");
+    } else {
+        Serial.println("⚠️ Control polling failed - button events may not work");
+    }
 }
 
 // Polling callback implementations
@@ -363,6 +348,194 @@ bool USBControlPad::sendActivationCommandsForInterface(int step, const char* des
     return (result == 0);
 }
 
+// ===== LED CONTROL COMMANDS =====
+
+bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
+    if (!initialized || length > 64) {
+        return false;
+    }
+    
+    // Send via interrupt transfer to control endpoint
+    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
+    delay(10); // Small delay between commands
+    
+    return (result == 0);
+}
+
+bool USBControlPad::setCustomMode() {
+    uint8_t cmd[64] = {
+        0x56, 0x81, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00,
+        0xbb, 0xbb, 0xbb, 0xbb  // Custom mode pattern
+        // Rest filled with zeros
+    };
+    
+    Serial.println("🎨 Setting custom LED mode");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::setStaticMode() {
+    uint8_t cmd[64] = {
+        0x56, 0x81, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00,
+        0x55, 0x55, 0x55, 0x55  // Static mode pattern
+        // Rest filled with zeros
+    };
+    
+    Serial.println("🎨 Setting static LED mode");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::sendLEDPackage1(const ControlPadColor* colors) {
+    uint8_t cmd[64] = {
+        0x56, 0x83, 0x00, 0x00,    // Header
+        0x01, 0x00, 0x00, 0x00,    // Package 1 marker
+        0x80, 0x01, 0x00, 0x00,    // Control flags
+        0xff, 0x00, 0x00, 0x00,    // Color flags
+        0x00, 0x00,                // Reserved
+        0xff, 0xff,                // Brightness for all LEDs
+        0x00, 0x00, 0x00, 0x00     // Reserved
+    };
+    
+    // LED data starts at position 24
+    size_t pos = 24;
+    
+    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20)
+    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
+        int btnIdx = i * 5;  // 0,5,10,15,20
+        cmd[pos++] = colors[btnIdx].r;
+        cmd[pos++] = colors[btnIdx].g;
+        cmd[pos++] = colors[btnIdx].b;
+    }
+    
+    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21)
+    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
+        int btnIdx = 1 + i * 5;  // 1,6,11,16,21
+        cmd[pos++] = colors[btnIdx].r;
+        cmd[pos++] = colors[btnIdx].g;
+        cmd[pos++] = colors[btnIdx].b;
+    }
+    
+    // Column 3: buttons 3,8,13 (indices 2,7,12) + partial button 18 (index 17)
+    for (int i = 0; i < 3 && pos + 2 < 64; i++) {
+        int btnIdx = 2 + i * 5;  // 2,7,12
+        cmd[pos++] = colors[btnIdx].r;
+        cmd[pos++] = colors[btnIdx].g;
+        cmd[pos++] = colors[btnIdx].b;
+    }
+    
+    // Button 18 (index 17) - only R component fits in package 1
+    if (pos < 64) {
+        cmd[pos++] = colors[17].r;  // Button 18 R
+    }
+    
+    Serial.println("🎨 Sending LED Package 1");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::sendLEDPackage2(const ControlPadColor* colors) {
+    uint8_t cmd[64] = {
+        0x56, 0x83, 0x01          // Header for package 2
+    };
+    
+    size_t pos = 3;
+    
+    // Complete button 18 (index 17) - GB components
+    cmd[pos++] = 0x00;  // Padding
+    cmd[pos++] = colors[17].g;  // Button 18 G
+    cmd[pos++] = colors[17].b;  // Button 18 B
+    
+    // Button 23 (index 22)
+    cmd[pos++] = colors[22].r;
+    cmd[pos++] = colors[22].g;
+    cmd[pos++] = colors[22].b;
+    
+    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23)
+    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
+        int btnIdx = 3 + i * 5;  // 3,8,13,18,23
+        cmd[pos++] = colors[btnIdx].r;
+        cmd[pos++] = colors[btnIdx].g;
+        cmd[pos++] = colors[btnIdx].b;
+    }
+    
+    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19) - button 24 is double width
+    for (int i = 0; i < 4 && pos + 2 < 64; i++) {
+        int btnIdx = 4 + i * 5;  // 4,9,14,19
+        cmd[pos++] = colors[btnIdx].r;
+        cmd[pos++] = colors[btnIdx].g;
+        cmd[pos++] = colors[btnIdx].b;
+    }
+    
+    // Rest filled with zeros (already initialized)
+    
+    Serial.println("🎨 Sending LED Package 2");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::sendApplyCommand() {
+    uint8_t cmd[64] = {
+        0x41, 0x80  // Apply/confirm command
+        // Rest filled with zeros
+    };
+    
+    Serial.println("🎨 Sending LED apply command");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::sendFinalizeCommand() {
+    uint8_t cmd[64] = {
+        0x51, 0x28, 0x00, 0x00,
+        0xff, 0x00  // Finalize pattern
+        // Rest filled with zeros
+    };
+    
+    Serial.println("🎨 Sending LED finalize command");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
+    if (!initialized || count > 24) {
+        Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
+        return false;
+    }
+    
+    Serial.printf("🌈 Updating all %zu LEDs with 5-command sequence\n", count);
+    
+    // Ensure we have 24 colors (pad with black if necessary)
+    ControlPadColor fullColors[24] = {};
+    for (size_t i = 0; i < count && i < 24; i++) {
+        fullColors[i] = colors[i];
+    }
+    
+    // Execute the 5-command sequence
+    bool success = true;
+    
+    success &= setCustomMode();
+    delay(12);
+    
+    success &= sendLEDPackage1(fullColors);
+    delay(11);
+    
+    success &= sendLEDPackage2(fullColors);
+    delay(12);
+    
+    success &= sendApplyCommand();
+    delay(9);
+    
+    success &= sendFinalizeCommand();
+    delay(10);
+    
+    if (success) {
+        Serial.println("✅ LED update sequence completed successfully");
+    } else {
+        Serial.println("❌ LED update sequence failed");
+    }
+    
+    return success;
+}
+
 // ===== HARDWARE MANAGER IMPLEMENTATION =====
 
 ControlPadHardware::ControlPadHardware() {
@@ -394,17 +567,52 @@ bool ControlPadHardware::begin(ControlPad& pad) {
     
     // 2. Start USB host
     usbHost.begin();
-    delay(2000); // Let devices enumerate
+    Serial.println("🔌 USB Host started, waiting for device enumeration...");
     
-    // 3. If driver was created by USB factory, start it
-    if (controlPadDriver) {
-        controlPadDriver->begin(controlpad_queue);
-        delay(500);
-        controlPadDriver->sendUSBInterfaceReSponseActivation();
+    // 3. Wait for device enumeration and driver creation (longer delay)
+    unsigned long startTime = millis();
+    while (!controlPadDriver && (millis() - startTime) < 10000) {  // 10 second timeout
+        delay(100);
+        if (controlPadDriver) {
+            Serial.println("✅ Driver instance detected!");
+            break;
+        }
     }
     
-    // 4. Call ControlPad's begin to finish setup
-    pad.begin();
+    if (!controlPadDriver) {
+        Serial.println("❌ No ControlPad driver found after 10 seconds");
+        return false;
+    }
+    
+    // 4. Wait additional time for USB configuration to stabilize
+    Serial.println("⏳ Waiting for USB configuration to stabilize...");
+    delay(2000);
+    
+    // 5. Now initialize the driver (this starts polling)
+    if (controlPadDriver) {
+        Serial.println("🎯 Starting driver initialization...");
+        bool initResult = controlPadDriver->begin(controlpad_queue);
+        if (!initResult) {
+            Serial.println("❌ Driver initialization failed");
+            return false;
+        }
+        
+        Serial.printf("✅ Driver initialized! initialized=%s\n", 
+                     controlPadDriver->initialized ? "true" : "false");
+        
+        // 6. Wait for polling to stabilize
+        delay(1000);
+        
+        // 7. Send activation sequence
+        Serial.println("🚀 Sending activation sequence...");
+        controlPadDriver->sendUSBInterfaceReSponseActivation();
+    } else {
+        Serial.println("❌ controlPadDriver is null - USB device not found");
+        return false;
+    }
+    
+    // 8. ControlPad setup is handled by the caller (main.cpp)
+    // No need to call pad.begin() here as it would create circular recursion
     
     return true;
 }
@@ -415,24 +623,18 @@ void ControlPadHardware::poll() {
 }
 
 void ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count) {
-    // Send the full LED state to the hardware
-    // This is a placeholder - you'll need to implement the actual LED protocol
-    // based on the working code from your monolithic file
-    
+    // Send the full LED state to the hardware using the new 5-command sequence
     Serial.printf("🎨 Hardware: Setting %zu LEDs\n", count);
     
-    // Example: pack all colors into a buffer and send via USB
-    uint8_t ledPacket[75]; // 25 buttons * 3 bytes each
-    ledPacket[0] = 0; // Avoid "set but not used" warning
-    
-    for (size_t i = 0; i < count && i < 25; ++i) {
-        // This would be where you pack the LED data according to your protocol
-        // For now, just log what we would do
-        Serial.printf("  LED %zu: RGB(%d,%d,%d)\n", i, colors[i].r, colors[i].g, colors[i].b);
+    // Use the USB driver to send the LED update
+    if (controlPadDriver) {
+        bool success = controlPadDriver->updateAllLEDs(colors, count);
+        if (success) {
+            Serial.println("✅ LED update completed via USB driver");
+        } else {
+            Serial.println("❌ LED update failed via USB driver");
+        }
+    } else {
+        Serial.println("❌ No USB driver available for LED update");
     }
-    
-    // TODO: Implement actual LED sending via controlPadDriver
-    // if (controlPadDriver) {
-    //     controlPadDriver->sendLEDData(ledPacket, sizeof(ledPacket));
-    // }
 }

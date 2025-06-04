@@ -104,6 +104,16 @@ public:
     bool sendUSBInterfaceReSponseActivation();
     bool sendActivationCommandsForInterface(int step, const char* description);
     
+    // LED control commands
+    bool sendCommand(const uint8_t* data, size_t length);
+    bool setCustomMode();
+    bool setStaticMode();
+    bool sendLEDPackage1(const ControlPadColor* colors);
+    bool sendLEDPackage2(const ControlPadColor* colors);
+    bool sendApplyCommand();
+    bool sendFinalizeCommand();
+    bool updateAllLEDs(const ControlPadColor* colors, size_t count);
+    
     // Friend class for hardware manager access
     friend class ControlPadHardware;
 };

@@ -52,6 +52,34 @@ void ControlPad::updateLeds() {
     hw->setAllLeds(ledState, CONTROLPAD_NUM_BUTTONS);
 }
 
+// Convenience methods for common patterns
+void ControlPad::setAllLedsOff() {
+    for (int i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
+        ledState[i] = {0, 0, 0};
+    }
+}
+
+void ControlPad::setAllLedsColor(uint8_t r, uint8_t g, uint8_t b) {
+    for (int i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
+        ledState[i] = {r, g, b};
+    }
+}
+
+void ControlPad::setRainbowPattern() {
+    // Create a rainbow pattern across the 24 buttons
+    const ControlPadColor rainbow[24] = {
+        {255, 0, 0},   {255, 64, 0},  {255, 127, 0}, {255, 191, 0}, {255, 255, 0},  // Row 1: Red to Yellow
+        {191, 255, 0}, {127, 255, 0}, {64, 255, 0},  {0, 255, 0},   {0, 255, 64},   // Row 2: Yellow to Green
+        {0, 255, 127}, {0, 255, 191}, {0, 255, 255}, {0, 191, 255}, {0, 127, 255},  // Row 3: Green to Cyan
+        {0, 64, 255},  {0, 0, 255},   {64, 0, 255},  {127, 0, 255}, {191, 0, 255},  // Row 4: Cyan to Blue
+        {255, 0, 255}, {255, 0, 191}, {255, 0, 127}, {255, 0, 64}   // Row 5: Blue to Magenta (24 buttons)
+    };
+    
+    for (int i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
+        ledState[i] = rainbow[i];
+    }
+}
+
 // Event API implementation
 bool ControlPad::pollEvent(ControlPadEvent& event) {
     // Check if there are events in the queue
