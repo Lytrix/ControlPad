@@ -23,6 +23,16 @@ struct ControlPadPacket {
   uint8_t data[61] = {0};      // Remaining 61 bytes (total 64 bytes)
 };
 
+// Structure to track Windows command verification
+struct CommandResponse {
+  bool received = false;
+  bool verified = false;
+  uint8_t expectedCmd1 = 0;
+  uint8_t expectedCmd2 = 0;
+  uint8_t actualCmd1 = 0;
+  uint8_t actualCmd2 = 0;
+};
+
 // ===== GLOBAL VARIABLES =====
 static DMAMEM TeensyUSBHost2 usbHost;
 ATOM_QUEUE controlpad_queue;
@@ -71,7 +81,6 @@ private:
   uint8_t statePacket2[64];  // Buttons 14-25
   
   uint8_t report_len = 64;
-  bool initialized = false;
   ATOM_QUEUE* queue = nullptr;
   
   // Separate callbacks for different interfaces
@@ -81,9 +90,11 @@ private:
   USBCallback btn_poll_cb;
   USBCallback btn_out_poll_cb;  // New callback for endpoint 0x07
   USBCallback send_cb;
-
-  // Track the last hall sensor group requested
+  
   uint8_t lastHallGroup = 0;
+  
+  // Command verification tracking
+  CommandResponse lastCommandResponse;
 
 public:
   // Static initialization test
@@ -98,6 +109,7 @@ public:
   bool dual_polling = false;
   bool btn_polling = false;
   bool btn_out_polling = false;  // New polling state for endpoint 0x07
+  bool initialized = false;  // Moved to public section
   
   // Constructor for USB_Driver_FactoryGlue (requires USB_Device*)
   USBControlPad(USB_Device* dev) : USB_Driver_FactoryGlue<USBControlPad>(dev), 
@@ -200,11 +212,180 @@ public:
   bool begin(ATOM_QUEUE *q) {
     queue = q;
     if (queue != nullptr) {
-      initializeDevice();
+      Serial.println("🎯 DRIVER BEGIN - Starting polling only, delaying activation...");
+      startDualPolling();
+      initialized = true;
+      
+      Serial.println("✅ Driver initialization complete - activation will happen after USB stabilizes");
     }
     return true;
   }
   
+  bool sendDelayedActivation() {
+    if (!initialized) {
+      Serial.println("❌ Driver not initialized yet");
+      return false;
+    }
+    
+    Serial.println("🔓 Sending DELAYED Windows startup sequence with acknowledgment checking...");
+    
+    // ENHANCED DEBUGGING: Send all commands regardless of individual failures
+    // to see if any later command works or if we get different patterns
+    bool step1_success = sendWindowsCommandWithVerification(1, "42 00 activation");
+    bool step2_success = sendWindowsCommandWithVerification(2, "42 10 variant");
+    bool step3_success = sendWindowsCommandWithVerification(3, "43 00 status");
+    bool step4_success = sendWindowsCommandWithVerification(4, "41 80 status");
+    bool step5_success = sendWindowsCommandWithVerification(5, "52 00 query");
+    bool step6_success = sendWindowsCommandWithVerification(6, "41 80 repeat");
+    bool step7_success = sendWindowsCommandWithVerification(7, "52 00 final");
+    
+    Serial.printf("📊 ACTIVATION SUMMARY: Step1=%s Step2=%s Step3=%s Step4=%s Step5=%s Step6=%s Step7=%s\n",
+                  step1_success ? "✅" : "❌", step2_success ? "✅" : "❌", step3_success ? "✅" : "❌",
+                  step4_success ? "✅" : "❌", step5_success ? "✅" : "❌", step6_success ? "✅" : "❌",
+                  step7_success ? "✅" : "❌");
+    
+    if (step1_success || step2_success || step3_success) {
+      Serial.println("🎉 At least one activation command was acknowledged!");
+    } else {
+      Serial.println("❌ No activation commands were acknowledged - device may need different protocol");
+    }
+    
+    // Try one more diagnostic test with minimal commands
+    Serial.println("🧪 TESTING SIMPLE ACTIVATION COMMANDS...");
+    uint8_t simple_cmd[8] = {0x43, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    lastCommandResponse.received = false;
+    lastCommandResponse.verified = false;
+    lastCommandResponse.expectedCmd1 = 0x43;
+    lastCommandResponse.expectedCmd2 = 0x01;
+    
+    int result = InterruptMessage(ctrl_ep_out, 8, simple_cmd, &send_cb);
+    Serial.printf("🔬 Direct 43 01 test (8 bytes): USB result=%d\n", result);
+    delay(200);
+    
+    if (lastCommandResponse.received) {
+      Serial.printf("📡 Response to direct 43 01: [0x%02X 0x%02X]\n", 
+                    lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
+    } else {
+      Serial.printf("📡 No response to direct 43 01 command\n");
+    }
+    
+    Serial.println("🚀 Complete Windows startup sequence completed - monitoring for button patterns...");
+    return true;
+  }
+  
+  bool sendWindowsCommandWithVerification(int step, const char* description) {
+    Serial.printf("📤 Step %d: %s...\n", step, description);
+    
+    // Define all Windows startup commands
+    uint8_t commands[7][64] = {
+      // Step 1: 0x42 00 activation
+      {0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 2: 0x42 10 variant  
+      {0x42, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 3: 0x43 00 button activation
+      {0x43, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 4: 0x41 80 status
+      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 5: 0x52 00 status query
+      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 6: 0x41 80 repeat (same as step 4)
+      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 7: 0x52 00 final (same as step 5)
+      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+    };
+    
+    // Define expected response patterns from Windows capture
+    uint8_t expectedResponses[7][8] = {
+      // Step 1: Device should echo back the exact same pattern
+      {0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01},
+      
+      // Step 2: Device modifies the payload (Windows capture shows zeros)
+      {0x42, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 3: Device responds with modified 0x43 pattern
+      {0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      
+      // Step 4-7: Other patterns (less critical, but we can verify first 2 bytes)
+      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+    };
+    
+    if (step < 1 || step > 7) {
+      Serial.printf("❌ Invalid step number: %d\n", step);
+      return false;
+    }
+    
+    // Clear any verification flags
+    lastCommandResponse.received = false;
+    lastCommandResponse.verified = false;
+    lastCommandResponse.expectedCmd1 = expectedResponses[step-1][0];
+    lastCommandResponse.expectedCmd2 = expectedResponses[step-1][1];
+    
+    // Send the command
+    int result = InterruptMessage(ctrl_ep_out, 64, commands[step-1], &send_cb);
+    Serial.printf("📊 USB send result: %d\n", result);
+    
+    if (result != 0) {
+      Serial.printf("❌ USB send failed: %d\n", result);
+      return false;
+    }
+    
+    // Wait for device response and verify acknowledgment
+    Serial.printf("⏳ Waiting for device to echo back [0x%02X 0x%02X] pattern...\n", 
+                  expectedResponses[step-1][0], expectedResponses[step-1][1]);
+    
+    // Wait up to 500ms for the expected response
+    unsigned long startTime = millis();
+    while (millis() - startTime < 500) {
+      if (lastCommandResponse.received && lastCommandResponse.verified) {
+        Serial.printf("✅ Device responded correctly with [0x%02X 0x%02X] pattern!\n",
+                      lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
+        return true;
+      }
+      delay(10);  // Small delay to prevent tight polling
+    }
+    
+    // Timeout - device didn't respond correctly
+    if (lastCommandResponse.received) {
+      Serial.printf("❌ Device responded but pattern incorrect. Expected [0x%02X 0x%02X], got [0x%02X 0x%02X]\n",
+                    expectedResponses[step-1][0], expectedResponses[step-1][1],
+                    lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
+    } else {
+      Serial.printf("❌ Device didn't respond within 500ms. Still getting FF AA patterns?\n");
+    }
+    
+    return false;
+  }
+
   void findEndpoints(const usb_interface_descriptor* iface, size_t length) {
     Serial.printf("🔍 Finding endpoints in interface %d...\n", iface->bInterfaceNumber);
     
@@ -1345,6 +1526,31 @@ public:
   bool sendHIDActivationCommands() {
     Serial.println("🎯 Sending HID SET_REPORT activation commands...");
     
+    // NEW: Enhanced methods based on USB capture analysis
+    Serial.println("🔍 Trying enhanced activation methods based on USB capture...");
+    
+    // Method 1: SET_IDLE command (common HID initialization)
+    Serial.println("📤 Enhanced Method 1: HID SET_IDLE...");
+    int idle_result = ControlMessage(0x21, 0x0A, 0x0000, 1, 0, nullptr);  // SET_IDLE to Interface 1
+    delay(10);
+    
+    // Method 2: GET_REPORT probe (some devices need this handshake)
+    Serial.println("📤 Enhanced Method 2: HID GET_REPORT probe...");
+    uint8_t probe_buffer[64] = {0};
+    int probe_result = ControlMessage(0xA1, 0x01, 0x0300, 1, 64, probe_buffer);  // GET_FEATURE_REPORT
+    delay(10);
+    
+    // Method 3: SET_PROTOCOL command (HID boot vs report protocol)
+    Serial.println("📤 Enhanced Method 3: HID SET_PROTOCOL...");
+    int protocol_result = ControlMessage(0x21, 0x0B, 0x0001, 1, 0, nullptr);  // Set Report Protocol
+    delay(10);
+    
+    // Method 4: Direct activation via control endpoint (bypass HID)
+    Serial.println("📤 Enhanced Method 4: Direct control endpoint activation...");
+    uint8_t direct_cmd[64] = {0x43, 0x01, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00};  
+    int direct_result = sendControlData(direct_cmd, 8);
+    delay(10);
+
     // HID Approach 1: Feature Report with vendor command
     uint8_t hidData1[64] = {0x56, 0x81, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00};
     Serial.println("📤 HID Approach 1: Feature Report with vendor init...");
@@ -1375,15 +1581,29 @@ public:
     Serial.println("📤 HID Approach 6: Output Report with button stream enable...");
     bool result6 = sendHIDSetReport(1, 0x02, 0x00, hidData6, 64);  // Output Report to Interface 1
     
-    Serial.printf("📊 HID Results: %s %s %s %s %s %s\n", 
-                  result1 ? "✅" : "❌", result2 ? "✅" : "❌", result3 ? "✅" : "❌",
-                  result4 ? "✅" : "❌", result5 ? "✅" : "❌", result6 ? "✅" : "❌");
+    // NEW HID Approach 7: Try exact pattern from USB capture
+    uint8_t hidData7[64] = {0x43, 0x01, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00};  // Based on capture frames
+    Serial.println("📤 HID Approach 7: USB capture pattern...");
+    bool result7 = sendHIDSetReport(1, 0x02, 0x01, hidData7, 64);  // Output Report with ID 1
     
-    if (result1 || result2 || result3 || result4 || result5 || result6) {
-      Serial.println("✅ All HID SET_REPORT commands sent!");
+    // NEW HID Approach 8: Try different interface targeting
+    uint8_t hidData8[64] = {0x56, 0x43, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x00};
+    Serial.println("📤 HID Approach 8: Interface 2 targeting...");
+    bool result8 = sendHIDSetReport(2, 0x03, 0x00, hidData8, 64);  // Feature Report to Interface 2
+    
+    Serial.printf("📊 Enhanced Results: IDLE=%d PROBE=%d PROTO=%d DIRECT=%d\n", 
+                  idle_result, probe_result, protocol_result, direct_result);
+    Serial.printf("📊 HID Results: %s %s %s %s %s %s %s %s\n", 
+                  result1 ? "✅" : "❌", result2 ? "✅" : "❌", result3 ? "✅" : "❌",
+                  result4 ? "✅" : "❌", result5 ? "✅" : "❌", result6 ? "✅" : "❌",
+                  result7 ? "✅" : "❌", result8 ? "✅" : "❌");
+    
+    if (result1 || result2 || result3 || result4 || result5 || result6 || result7 || result8 ||
+        idle_result == 0 || probe_result == 0 || protocol_result == 0 || direct_result == 0) {
+      Serial.println("✅ Some activation commands succeeded!");
       return true;
     } else {
-      Serial.println("❌ All HID SET_REPORT commands failed");
+      Serial.println("❌ All activation commands failed");
       return false;
     }
   }
@@ -1585,6 +1805,36 @@ public:
           }
           Serial.println();
           activation_verified = true;
+        }
+        
+        // Check if this matches an expected command response
+        if (result >= 2 && !lastCommandResponse.verified) {
+          lastCommandResponse.received = true;
+          lastCommandResponse.actualCmd1 = ctrl_report[0];
+          lastCommandResponse.actualCmd2 = ctrl_report[1];
+          
+          Serial.printf("🔍 ACTIVATION RESPONSE: Expected [0x%02X 0x%02X], received [0x%02X 0x%02X]\n",
+                        lastCommandResponse.expectedCmd1, lastCommandResponse.expectedCmd2,
+                        ctrl_report[0], ctrl_report[1]);
+          
+          // Show complete first 16 bytes for debugging
+          Serial.printf("📦 Full response packet (first 16 bytes): ");
+          for (int i = 0; i < min(16, result); i++) {
+            Serial.printf("%02X ", ctrl_report[i]);
+          }
+          Serial.println();
+          
+          // Verify if it matches expected pattern
+          if (ctrl_report[0] == lastCommandResponse.expectedCmd1 && 
+              ctrl_report[1] == lastCommandResponse.expectedCmd2) {
+            lastCommandResponse.verified = true;
+            Serial.printf("✅ Command verification SUCCESS: Device echoed [0x%02X 0x%02X]\n",
+                          ctrl_report[0], ctrl_report[1]);
+          } else {
+            Serial.printf("⚠️ Command echo MISMATCH: Expected [0x%02X 0x%02X], got [0x%02X 0x%02X]\n",
+                          lastCommandResponse.expectedCmd1, lastCommandResponse.expectedCmd2,
+                          ctrl_report[0], ctrl_report[1]);
+          }
         }
       }
       
@@ -2334,7 +2584,7 @@ void setup() {
   Serial.println("🔌 Starting USB Host...");
   usbHost.begin();
   
-  delay(1000);  // Give devices time to enumerate
+  delay(2000);  // Give devices time to enumerate
   
   Serial.println("✅ USB Host initialized successfully");
   Serial.println("🔧 Dual interface driver factory registered");
@@ -2350,8 +2600,16 @@ void setup() {
 void loop() {
   static unsigned long lastTime = 0;
   static int loopCounter = 0;
+  static bool activationSent = false;
   
   loopCounter++;
+  
+  // Send delayed activation once after 3 seconds
+  if (!activationSent && millis() > 3000 && controlPadDriver && controlPadDriver->initialized) {
+    Serial.println("⏰ 3 seconds elapsed - sending delayed activation sequence...");
+    controlPadDriver->sendDelayedActivation();
+    activationSent = true;
+  }
   
   // Process all events from queue
   controlpad_event event;
