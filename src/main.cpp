@@ -71,10 +71,10 @@ private:
   uint8_t dual_report[8] __attribute__((aligned(32)));
   
   // Interface 3 (Real Buttons) endpoints and data
-  uint8_t btn_ep_in = 0x86;    // Real button events endpoint (hall sensors)
+  uint8_t hall_sensor_ep_in = 0x86;    // Hall sensor data endpoint (Interface 3)
   uint8_t btn_ep_out = 0x07;   // Alternative button events endpoint 
-  uint8_t btn_report[32] __attribute__((aligned(32)));
-  uint8_t btn_out_report[32] __attribute__((aligned(32)));  // For endpoint 0x07
+  uint8_t hall_sensor_report[32] __attribute__((aligned(32)));
+  uint8_t sensor_out_report[32] __attribute__((aligned(32)));  // For endpoint 0x07
   
   // State buffers to hold full 25-button RGBW values for custom mode
   uint8_t statePacket1[64];  // Buttons 1-13
@@ -87,8 +87,8 @@ private:
   USBCallback kbd_poll_cb;
   USBCallback ctrl_poll_cb;
   USBCallback dual_poll_cb;
-  USBCallback btn_poll_cb;
-  USBCallback btn_out_poll_cb;  // New callback for endpoint 0x07
+  USBCallback hall_sensor_poll_cb;
+  USBCallback sensor_out_poll_cb;  // New callback for endpoint 0x07
   USBCallback send_cb;
   
   uint8_t lastHallGroup = 0;
@@ -107,8 +107,8 @@ public:
   bool kbd_polling = false;
   bool ctrl_polling = false;
   bool dual_polling = false;
-  bool btn_polling = false;
-  bool btn_out_polling = false;  // New polling state for endpoint 0x07
+  bool hall_sensor_polling = false;
+  bool sensor_out_polling = false;  // New polling state for endpoint 0x07
   bool initialized = false;  // Moved to public section
   
   // Constructor for USB_Driver_FactoryGlue (requires USB_Device*)
@@ -116,8 +116,8 @@ public:
                                    kbd_poll_cb([this](int r) { kbd_poll(r); }),
                                    ctrl_poll_cb([this](int r) { ctrl_poll(r); }),
                                    dual_poll_cb([this](int r) { dual_poll(r); }),
-                                   btn_poll_cb([this](int r) { btn_poll(r); }),
-                                   btn_out_poll_cb([this](int r) { btn_out_poll(r); }),
+                                   hall_sensor_poll_cb([this](int r) { hall_sensor_poll(r); }),
+                                   sensor_out_poll_cb([this](int r) { sensor_out_poll(r); }),
                                    send_cb([this](int r) { sent(r); }) {
     Serial.println("🔧 USBControlPad DUAL INTERFACE driver instance created");
     factory_registered = true;
@@ -203,10 +203,10 @@ public:
     ctrl_ep_in = 0x83;   // Interface 1 control input  
     ctrl_ep_out = 0x04;  // Interface 1 control output
     dual_ep_in = 0x82;   // Interface 2 dual-action input
-    btn_ep_in = 0x86;    // Interface 3 real button events
+    hall_sensor_ep_in = 0x86;    // Interface 3 hall sensor data
     btn_ep_out = 0x07;   // Interface 3 alternative button events
     Serial.printf("✅ Endpoints: Kbd=0x%02X, Ctrl=0x%02X/0x%02X, Dual=0x%02X, Btn=0x%02X/0x%02X\n", 
-                  kbd_ep_in, ctrl_ep_in, ctrl_ep_out, dual_ep_in, btn_ep_in, btn_ep_out);
+                  kbd_ep_in, ctrl_ep_in, ctrl_ep_out, dual_ep_in, hall_sensor_ep_in, btn_ep_out);
   }
   
   bool begin(ATOM_QUEUE *q) {
@@ -221,61 +221,24 @@ public:
     return true;
   }
   
-  bool sendDelayedActivation() {
+  bool sendUSBInterfaceReSponseActivation() {
     if (!initialized) {
-      Serial.println("❌ Driver not initialized yet");
       return false;
     }
     
-    Serial.println("🔓 Sending DELAYED Windows startup sequence with acknowledgment checking...");
+    // Send Windows startup sequence silently
+    sendWindowsCommandWithVerification(1, "42 00 activation");
+    sendWindowsCommandWithVerification(2, "42 10 variant");
+    sendWindowsCommandWithVerification(3, "43 00 status");
+    sendWindowsCommandWithVerification(4, "41 80 status");
+    sendWindowsCommandWithVerification(5, "52 00 query");
+    sendWindowsCommandWithVerification(6, "41 80 repeat");
+    sendWindowsCommandWithVerification(7, "52 00 final");
     
-    // ENHANCED DEBUGGING: Send all commands regardless of individual failures
-    // to see if any later command works or if we get different patterns
-    bool step1_success = sendWindowsCommandWithVerification(1, "42 00 activation");
-    bool step2_success = sendWindowsCommandWithVerification(2, "42 10 variant");
-    bool step3_success = sendWindowsCommandWithVerification(3, "43 00 status");
-    bool step4_success = sendWindowsCommandWithVerification(4, "41 80 status");
-    bool step5_success = sendWindowsCommandWithVerification(5, "52 00 query");
-    bool step6_success = sendWindowsCommandWithVerification(6, "41 80 repeat");
-    bool step7_success = sendWindowsCommandWithVerification(7, "52 00 final");
-    
-    Serial.printf("📊 ACTIVATION SUMMARY: Step1=%s Step2=%s Step3=%s Step4=%s Step5=%s Step6=%s Step7=%s\n",
-                  step1_success ? "✅" : "❌", step2_success ? "✅" : "❌", step3_success ? "✅" : "❌",
-                  step4_success ? "✅" : "❌", step5_success ? "✅" : "❌", step6_success ? "✅" : "❌",
-                  step7_success ? "✅" : "❌");
-    
-    if (step1_success || step2_success || step3_success) {
-      Serial.println("🎉 At least one activation command was acknowledged!");
-    } else {
-      Serial.println("❌ No activation commands were acknowledged - device may need different protocol");
-    }
-    
-    // Try one more diagnostic test with minimal commands
-    Serial.println("🧪 TESTING SIMPLE ACTIVATION COMMANDS...");
-    uint8_t simple_cmd[8] = {0x43, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    lastCommandResponse.received = false;
-    lastCommandResponse.verified = false;
-    lastCommandResponse.expectedCmd1 = 0x43;
-    lastCommandResponse.expectedCmd2 = 0x01;
-    
-    int result = InterruptMessage(ctrl_ep_out, 8, simple_cmd, &send_cb);
-    Serial.printf("🔬 Direct 43 01 test (8 bytes): USB result=%d\n", result);
-    delay(200);
-    
-    if (lastCommandResponse.received) {
-      Serial.printf("📡 Response to direct 43 01: [0x%02X 0x%02X]\n", 
-                    lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
-    } else {
-      Serial.printf("📡 No response to direct 43 01 command\n");
-    }
-    
-    Serial.println("🚀 Complete Windows startup sequence completed - monitoring for button patterns...");
     return true;
   }
   
   bool sendWindowsCommandWithVerification(int step, const char* description) {
-    Serial.printf("📤 Step %d: %s...\n", step, description);
-    
     // Define all Windows startup commands
     uint8_t commands[7][64] = {
       // Step 1: 0x42 00 activation
@@ -321,69 +284,15 @@ public:
        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
     };
     
-    // Define expected response patterns from Windows capture
-    uint8_t expectedResponses[7][8] = {
-      // Step 1: Device should echo back the exact same pattern
-      {0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01},
-      
-      // Step 2: Device modifies the payload (Windows capture shows zeros)
-      {0x42, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-      
-      // Step 3: Device responds with modified 0x43 pattern
-      {0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-      
-      // Step 4-7: Other patterns (less critical, but we can verify first 2 bytes)
-      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-      {0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-      {0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-    };
-    
     if (step < 1 || step > 7) {
-      Serial.printf("❌ Invalid step number: %d\n", step);
       return false;
     }
-    
-    // Clear any verification flags
-    lastCommandResponse.received = false;
-    lastCommandResponse.verified = false;
-    lastCommandResponse.expectedCmd1 = expectedResponses[step-1][0];
-    lastCommandResponse.expectedCmd2 = expectedResponses[step-1][1];
     
     // Send the command
     int result = InterruptMessage(ctrl_ep_out, 64, commands[step-1], &send_cb);
-    Serial.printf("📊 USB send result: %d\n", result);
+    delay(50);  // Small delay between commands
     
-    if (result != 0) {
-      Serial.printf("❌ USB send failed: %d\n", result);
-      return false;
-    }
-    
-    // Wait for device response and verify acknowledgment
-    Serial.printf("⏳ Waiting for device to echo back [0x%02X 0x%02X] pattern...\n", 
-                  expectedResponses[step-1][0], expectedResponses[step-1][1]);
-    
-    // Wait up to 500ms for the expected response
-    unsigned long startTime = millis();
-    while (millis() - startTime < 500) {
-      if (lastCommandResponse.received && lastCommandResponse.verified) {
-        Serial.printf("✅ Device responded correctly with [0x%02X 0x%02X] pattern!\n",
-                      lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
-        return true;
-      }
-      delay(10);  // Small delay to prevent tight polling
-    }
-    
-    // Timeout - device didn't respond correctly
-    if (lastCommandResponse.received) {
-      Serial.printf("❌ Device responded but pattern incorrect. Expected [0x%02X 0x%02X], got [0x%02X 0x%02X]\n",
-                    expectedResponses[step-1][0], expectedResponses[step-1][1],
-                    lastCommandResponse.actualCmd1, lastCommandResponse.actualCmd2);
-    } else {
-      Serial.printf("❌ Device didn't respond within 500ms. Still getting FF AA patterns?\n");
-    }
-    
-    return false;
+    return (result == 0);
   }
 
   void findEndpoints(const usb_interface_descriptor* iface, size_t length) {
@@ -1414,20 +1323,6 @@ public:
 
   bool initializeDevice() {
     Serial.println("🔧 INITIALIZING CONTROLPAD DEVICE...");
-    
-    // Simplified activation - just essential HID commands
-    Serial.println("🚀 SENDING ESSENTIAL HID ACTIVATION COMMANDS...");
-    sendEssentialHIDCommands();
-    delay(100);  // Brief pause for device processing
-    
-    Serial.println("🔧 ATTEMPTING TO DISABLE HID MODE");
-    bool result1 = setLEDs(0, 0, 0);
-    if (result1) {
-      Serial.println("✅ Initial LED command successful");
-    } else {
-      Serial.println("⚠️ Initial LED command failed");
-    }
-    
     delay(50);
     
     Serial.println("🟡 INITIALIZING PROFILES");
@@ -1444,29 +1339,11 @@ public:
     return true;
   }
 
-  // NEW: Essential HID commands - call the full HID activation sequence
-  bool sendEssentialHIDCommands() {
-    Serial.println("🎯 Sending essential HID commands - calling HID activation...");
-    
-    // Call the existing HID activation commands that include the 0x40 pattern
-    bool result = sendHIDActivationCommands();
-    
-    Serial.printf("📊 Essential HID command result: %s\n", result ? "✅" : "❌");
-    
-    return result;
-  }
 
   // NEW: Device activation command to unlock EP 0x83 data flow
   bool sendDeviceActivationCommand() {
     Serial.println("🚀 Sending DEVICE ACTIVATION command to EP 0x04 to unlock EP 0x83 data flow...");
-    
-    // FIRST: Try HID SET_REPORT commands (most likely to work for HID devices)
-    Serial.println("🎯 === HID SET_REPORT ACTIVATION ATTEMPTS ===");
-    sendHIDActivationCommands();
-    delay(100);
-    
-    // Try multiple activation approaches since we don't know the exact command
-    
+     
     // Approach 1: Standard ControlPad LED command (known to work)
     ControlPadPacket activationPkt1;
     activationPkt1.vendor_id = 0x56;
@@ -1522,92 +1399,7 @@ public:
     }
   }
 
-  // NEW: HID activation commands
-  bool sendHIDActivationCommands() {
-    Serial.println("🎯 Sending HID SET_REPORT activation commands...");
-    
-    // NEW: Enhanced methods based on USB capture analysis
-    Serial.println("🔍 Trying enhanced activation methods based on USB capture...");
-    
-    // Method 1: SET_IDLE command (common HID initialization)
-    Serial.println("📤 Enhanced Method 1: HID SET_IDLE...");
-    int idle_result = ControlMessage(0x21, 0x0A, 0x0000, 1, 0, nullptr);  // SET_IDLE to Interface 1
-    delay(10);
-    
-    // Method 2: GET_REPORT probe (some devices need this handshake)
-    Serial.println("📤 Enhanced Method 2: HID GET_REPORT probe...");
-    uint8_t probe_buffer[64] = {0};
-    int probe_result = ControlMessage(0xA1, 0x01, 0x0300, 1, 64, probe_buffer);  // GET_FEATURE_REPORT
-    delay(10);
-    
-    // Method 3: SET_PROTOCOL command (HID boot vs report protocol)
-    Serial.println("📤 Enhanced Method 3: HID SET_PROTOCOL...");
-    int protocol_result = ControlMessage(0x21, 0x0B, 0x0001, 1, 0, nullptr);  // Set Report Protocol
-    delay(10);
-    
-    // Method 4: Direct activation via control endpoint (bypass HID)
-    Serial.println("📤 Enhanced Method 4: Direct control endpoint activation...");
-    uint8_t direct_cmd[64] = {0x43, 0x01, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00};  
-    int direct_result = sendControlData(direct_cmd, 8);
-    delay(10);
-
-    // HID Approach 1: Feature Report with vendor command
-    uint8_t hidData1[64] = {0x56, 0x81, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 1: Feature Report with vendor init...");
-    bool result1 = sendHIDSetReport(1, 0x03, 0x00, hidData1, 64);  // Feature Report to Interface 1
-    
-    // HID Approach 2: Feature Report with button enable
-    uint8_t hidData2[64] = {0x56, 0x43, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 2: Feature Report with button enable...");
-    bool result2 = sendHIDSetReport(1, 0x03, 0x01, hidData2, 64);  // Feature Report to Interface 1
-    
-    // HID Approach 3: Feature Report with mode switch
-    uint8_t hidData3[64] = {0x56, 0x83, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 3: Feature Report with mode switch...");
-    bool result3 = sendHIDSetReport(1, 0x03, 0x02, hidData3, 64);  // Feature Report to Interface 1
-    
-    // HID Approach 4: Feature Report with activation pattern
-    uint8_t hidData4[64] = {0x43, 0x01, 0xFF, 0xC0, 0x40, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 4: Feature Report with activation pattern...");
-    bool result4 = sendHIDSetReport(1, 0x03, 0x03, hidData4, 64);  // Feature Report to Interface 1
-    
-    // HID Approach 5: Feature Report to Interface 0 (keyboard)
-    uint8_t hidData5[64] = {0x56, 0x00, 0x43, 0x01, 0x01, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 5: Feature Report to Interface 0 (keyboard)...");
-    bool result5 = sendHIDSetReport(0, 0x03, 0x00, hidData5, 64);  // Feature Report to Interface 0
-    
-    // HID Approach 6: Output Report with button stream enable
-    uint8_t hidData6[64] = {0x56, 0x43, 0x01, 0x00, 0x01, 0xFF, 0x00, 0x00};
-    Serial.println("📤 HID Approach 6: Output Report with button stream enable...");
-    bool result6 = sendHIDSetReport(1, 0x02, 0x00, hidData6, 64);  // Output Report to Interface 1
-    
-    // NEW HID Approach 7: Try exact pattern from USB capture
-    uint8_t hidData7[64] = {0x43, 0x01, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00};  // Based on capture frames
-    Serial.println("📤 HID Approach 7: USB capture pattern...");
-    bool result7 = sendHIDSetReport(1, 0x02, 0x01, hidData7, 64);  // Output Report with ID 1
-    
-    // NEW HID Approach 8: Try different interface targeting
-    uint8_t hidData8[64] = {0x56, 0x43, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x00};
-    Serial.println("📤 HID Approach 8: Interface 2 targeting...");
-    bool result8 = sendHIDSetReport(2, 0x03, 0x00, hidData8, 64);  // Feature Report to Interface 2
-    
-    Serial.printf("📊 Enhanced Results: IDLE=%d PROBE=%d PROTO=%d DIRECT=%d\n", 
-                  idle_result, probe_result, protocol_result, direct_result);
-    Serial.printf("📊 HID Results: %s %s %s %s %s %s %s %s\n", 
-                  result1 ? "✅" : "❌", result2 ? "✅" : "❌", result3 ? "✅" : "❌",
-                  result4 ? "✅" : "❌", result5 ? "✅" : "❌", result6 ? "✅" : "❌",
-                  result7 ? "✅" : "❌", result8 ? "✅" : "❌");
-    
-    if (result1 || result2 || result3 || result4 || result5 || result6 || result7 || result8 ||
-        idle_result == 0 || probe_result == 0 || protocol_result == 0 || direct_result == 0) {
-      Serial.println("✅ Some activation commands succeeded!");
-      return true;
-    } else {
-      Serial.println("❌ All activation commands failed");
-      return false;
-    }
-  }
-
+ 
   // NEW: Send HID SET_REPORT control transfer
   bool sendHIDSetReport(uint8_t interface, uint8_t reportType, uint8_t reportId, uint8_t* data, uint16_t length) {
     Serial.printf("🔧 HID SET_REPORT: Interface=%d, Type=0x%02X, ID=0x%02X, Length=%d\n", 
@@ -1726,13 +1518,7 @@ public:
         memcpy(event.data, kbd_report, result);
         event.len = result;
         atomQueuePut(queue, 0, &event);
-        
-        // Also show the complete packet for debugging
-        Serial.printf("🎯 ACTUAL KEY PRESS detected! Complete packet: ");
-        for (int i = 0; i < result; i++) {
-          Serial.printf("0x%02X ", kbd_report[i]);
-        }
-        Serial.println();
+
       }
       
       // Restart keyboard polling
@@ -1764,215 +1550,27 @@ public:
   
   void ctrl_poll(int result) {
     static int ctrl_counter = 0;
-    static int all_calls = 0;
-    static bool ff_aa_warned = false;
-    static bool activation_verified = false;
-    
-    all_calls++;
-    
-    // DEBUG: Show ALL ctrl_poll calls to diagnose the issue
-    if (all_calls <= 20 || all_calls % 10 == 1) {
-      Serial.printf("🔍 ctrl_poll call #%d: result=%d, queue=%s\n", 
-                    all_calls, result, queue ? "OK" : "NULL");
-    }
     
     if (result > 0 && queue) {
       ctrl_counter++;
       
-      // CRITICAL: Check for FF AA pattern (device inactive/needs activation)
-      if (result >= 2 && ctrl_report[0] == 0xFF && ctrl_report[1] == 0xAA && !ff_aa_warned) {
-        Serial.println("🚨🚨🚨 DETECTED FF AA PATTERN - DEVICE NOT ACTIVATED! 🚨🚨🚨");
-        Serial.println("📋 This confirms the device needs proper activation command on EP 0x04");
-        Serial.println("💡 Try sending a different activation command or check Wireshark logs");
-        Serial.println("🔧 The current activation commands may not be the right ones for this device");
-        ff_aa_warned = true;  // Only warn once to avoid spam
-        
-        // Show the complete FF AA packet for analysis
-        Serial.print("📦 Complete FF AA packet: ");
-        for (int i = 0; i < min(32, result); i++) {
-          Serial.printf("%02X ", ctrl_report[i]);
-        }
-        Serial.println();
+      // Show control packets for LED verification
+      Serial.printf("🎮 Control poll #%d (%d bytes): ", ctrl_counter, result);
+      for (int i = 0; i < min(16, result); i++) {
+        Serial.printf("0x%02X ", ctrl_report[i]);
       }
+      Serial.println();
       
-      // Check if we got real data (not FF AA)
-      if (result >= 2 && !(ctrl_report[0] == 0xFF && ctrl_report[1] == 0xAA)) {
-        if (!activation_verified) {
-          Serial.printf("🎉 DEVICE ACTIVATION VERIFIED: Got non-FF-AA data on EP 0x83!\n");
-          Serial.print("📥 First real data: ");
-          for (int i = 0; i < min(16, result); i++) {
-            Serial.printf("%02X ", ctrl_report[i]);
-          }
-          Serial.println();
-          activation_verified = true;
-        }
+      // Check for button press pattern: 43 01 00 00 XX (pressed/released)
+      if (result >= 6 && ctrl_report[0] == 0x43 && ctrl_report[1] == 0x01 && 
+          ctrl_report[2] == 0x00 && ctrl_report[3] == 0x00) {
+        uint8_t buttonId = ctrl_report[4];
+        uint8_t state = ctrl_report[5];
         
-        // Check if this matches an expected command response
-        if (result >= 2 && !lastCommandResponse.verified) {
-          lastCommandResponse.received = true;
-          lastCommandResponse.actualCmd1 = ctrl_report[0];
-          lastCommandResponse.actualCmd2 = ctrl_report[1];
-          
-          Serial.printf("🔍 ACTIVATION RESPONSE: Expected [0x%02X 0x%02X], received [0x%02X 0x%02X]\n",
-                        lastCommandResponse.expectedCmd1, lastCommandResponse.expectedCmd2,
-                        ctrl_report[0], ctrl_report[1]);
-          
-          // Show complete first 16 bytes for debugging
-          Serial.printf("📦 Full response packet (first 16 bytes): ");
-          for (int i = 0; i < min(16, result); i++) {
-            Serial.printf("%02X ", ctrl_report[i]);
-          }
-          Serial.println();
-          
-          // Verify if it matches expected pattern
-          if (ctrl_report[0] == lastCommandResponse.expectedCmd1 && 
-              ctrl_report[1] == lastCommandResponse.expectedCmd2) {
-            lastCommandResponse.verified = true;
-            Serial.printf("✅ Command verification SUCCESS: Device echoed [0x%02X 0x%02X]\n",
-                          ctrl_report[0], ctrl_report[1]);
-          } else {
-            Serial.printf("⚠️ Command echo MISMATCH: Expected [0x%02X 0x%02X], got [0x%02X 0x%02X]\n",
-                          lastCommandResponse.expectedCmd1, lastCommandResponse.expectedCmd2,
-                          ctrl_report[0], ctrl_report[1]);
-          }
-        }
-      }
-      
-      // DEBUG: SHOW ALL CONTROL PACKETS - this is where "43 01" should appear!
-      if (ctrl_counter <= 10 || (ctrl_report[0] == 0x43 && ctrl_report[1] == 0x01) || 
-          (ctrl_counter % 50 == 1 && !ff_aa_warned)) {
-        Serial.printf("🎮 Control poll #%d (%d bytes): ", ctrl_counter, result);
-        for (int i = 0; i < min(16, result); i++) {
-          Serial.printf("0x%02X ", ctrl_report[i]);
-        }
-        Serial.println();
-      }
-      
-      // Check for 43 01 pattern ANYWHERE in the packet
-      for (int i = 0; i < result - 1; i++) {
-        if (ctrl_report[i] == 0x43 && ctrl_report[i+1] == 0x01) {
-          Serial.printf("🔥🔥🔥 FOUND 43 01 at position %d in ctrl_poll! 🔥🔥🔥\n", i);
-          
-          // Show the complete sequence around the pattern
-          Serial.printf("🎯 Context: ");
-          for (int j = max(0, i-2); j < min(result, i+8); j++) {
-            if (j == i) Serial.printf("[0x%02X 0x%02X] ", ctrl_report[j], ctrl_report[j+1]);
-            else if (j != i+1) Serial.printf("0x%02X ", ctrl_report[j]);
-          }
-          Serial.println();
-          
-          // Check for EXACT USB capture pattern: 43 01 00 00 XX c0
-          if (i + 5 < result && 
-              ctrl_report[i+2] == 0x00 && 
-              ctrl_report[i+3] == 0x00 && 
-              ctrl_report[i+5] == 0xc0) {
-            uint8_t buttonId = ctrl_report[i+4];
-            Serial.printf("🚨🚨🚨 USB CAPTURE PATTERN DETECTED: 43 01 00 00 %02X c0 (Button ID: 0x%02X) 🚨🚨🚨\n", buttonId, buttonId);
-            
-            // Flash GREEN for pattern detection
-            if (controlPadDriver) {
-              Serial.printf("🟢 FLASHING GREEN LEDs for USB pattern detection!\n");
-              controlPadDriver->sendGreenPattern();
-            }
-          }
-        }
-      }
-      
-      // first, detect a "button press" on the control interface…
-      // (the 0x43/0x01 header is what the ControlPad uses for gamepad buttons)
-      if (ctrl_report[4] == 0x43 && ctrl_report[5] == 0x01) {
-        uint8_t code = ctrl_report[6];  // button ID is at offset 6 (corrected from USB capture)
-        uint8_t state = ctrl_report[7]; // button state at offset 7 (corrected from USB capture)
-        
-        Serial.printf("🔍 Control event: ID=0x%02X, state=0x%02X\n", code, state);
-        
-        // Only process button presses (0xc0), ignore releases (0x40)
-        if (state == 0xc0) {
-          uint8_t buttonNumber = 0, r=255, g=0, b=0;
-          switch (code) {
-            // Row 1: Buttons 1-5
-              case 0x00: buttonNumber = 1; r = 255; g = 0; b = 0; break;     // Button 1: Red
-              case 0x05: buttonNumber = 2; r = 0; g = 255; b = 0; break;     // Button 2: Green  
-              case 0x10: buttonNumber = 3; r = 0; g = 0; b = 255; break;     // Button 3: Blue
-              case 0x15: buttonNumber = 4; r = 255; g = 255; b = 0; break;   // Button 4: Yellow
-              case 0x20: buttonNumber = 5; r = 255; g = 125; b = 255; break; // Button 5: Magenta
-              
-              // Row 2: Buttons 6-10 (based on breakdown mapping)
-              case 0x01: buttonNumber = 6; r = 0; g = 255; b = 255; break;   // Button 6: Cyan
-              case 0x06: buttonNumber = 7; r = 255; g = 128; b = 0; break;   // Button 7: Orange
-              case 0x11: buttonNumber = 8; r = 128; g = 0; b = 255; break;   // Button 8: Purple
-              case 0x16: buttonNumber = 9; r = 255; g = 255; b = 255; break; // Button 9: White
-              case 0x21: buttonNumber = 10; r = 255; g = 128; b = 128; break; // Button 10: Light Red
-              
-              // Row 3: Buttons 11-15
-              case 0x02: buttonNumber = 11; r = 255; g = 64; b = 64; break;   // Button 11: Light Red
-              case 0x07: buttonNumber = 12; r = 64; g = 255; b = 64; break;   // Button 12: Light Green
-              case 0x12: buttonNumber = 13; r = 64; g = 64; b = 255; break;   // Button 13: Light Blue
-              case 0x17: buttonNumber = 14; r = 192; g = 192; b = 0; break;   // Button 14: Dark Yellow
-              case 0x22: buttonNumber = 15; r = 192; g = 0; b = 192; break;   // Button 15: Dark Magenta
-              
-              // Row 4: Buttons 16-20
-              case 0x03: buttonNumber = 16; r = 0; g = 192; b = 192; break;   // Button 16: Dark Cyan
-              case 0x08: buttonNumber = 17; r = 255; g = 192; b = 128; break; // Button 17: Peach
-              case 0x13: buttonNumber = 18; r = 128; g = 255; b = 192; break; // Button 18: Mint (split RGB!)
-              case 0x18: buttonNumber = 19; r = 192; g = 128; b = 255; break; // Button 19: Lavender
-              case 0x23: buttonNumber = 20; r = 255; g = 255; b = 128; break; // Button 20: Light Yellow
-              
-              // Row 5: Buttons 21-24 (button 24 is 2-wide)
-              case 0x04: buttonNumber = 21; r = 128; g = 255; b = 255; break; // Button 21: Light Cyan
-              case 0x09: buttonNumber = 22; r = 255; g = 128; b = 255; break; // Button 22: Light Magenta
-              case 0x14: buttonNumber = 23; r = 255; g = 255; b = 192; break; // Button 23: Cream
-              case 0x19: buttonNumber = 24; r = 64;  g = 128; b = 192; break; // Button 24: Steel Blue
-            default:  break;
-          }
-          if (buttonNumber) {
-            Serial.printf("🎯 Control press: ID=0x%02X -> Button %d, RGB(%d,%d,%d)\n", code, buttonNumber, r, g, b);
-            // fire your LED-command right here
-            controlPadDriver->sendSimpleLEDTest(buttonNumber, r, g, b);
-          }
-        }
-      }
-
-      // Check for vertical button press format: 43 01 at positions 4-5, button ID at position 6
-      if (ctrl_report[0] == 0x43 && ctrl_report[1] == 0x01) {
-        uint8_t buttonId = ctrl_report[4];  // Vertical button ID (0x00-0x17)
-        Serial.printf("🔥 BUTTON PRESSED: ID=0x%02X (vertical) - Processing in ctrl_poll\n", buttonId);
-        
-        // Debug: Show complete control packet to find the real button ID position
-        Serial.printf("🔍 COMPLETE CONTROL PACKET (64 bytes): ");
-        for (int i = 0; i < 64; i++) {
-          Serial.printf("0x%02X ", ctrl_report[i]);
-          if ((i + 1) % 16 == 0) Serial.println(); // New line every 16 bytes
-        }
-        Serial.println();
-        
-        Serial.printf("🔍 Key positions: [0]=0x%02X [1]=0x%02X [2]=0x%02X [3]=0x%02X [4]=0x%02X [5]=0x%02X [6]=0x%02X [7]=0x%02X [8]=0x%02X [9]=0x%02X [10]=0x%02X [11]=0x%02X\n",
-                      ctrl_report[0], ctrl_report[1], ctrl_report[2], ctrl_report[3], 
-                      ctrl_report[4], ctrl_report[5], ctrl_report[6], ctrl_report[7],
-                      ctrl_report[8], ctrl_report[9], ctrl_report[10], ctrl_report[11]);
-        
-        // Debug: Try different positions for button ID
-        Serial.printf("🔍 Button ID candidates: pos[2]=0x%02X pos[3]=0x%02X pos[6]=0x%02X pos[7]=0x%02X pos[8]=0x%02X pos[9]=0x%02X pos[10]=0x%02X pos[11]=0x%02X\n",
-                      ctrl_report[2], ctrl_report[3], ctrl_report[6], ctrl_report[7], 
-                      ctrl_report[8], ctrl_report[9], ctrl_report[10], ctrl_report[11]);
-        
-        // Try position 3 instead of 6 (common alternative)
-        uint8_t altButtonId = ctrl_report[3];
-        Serial.printf("🔍 Alternative button ID at position 3: 0x%02X\n", altButtonId);
-        
-        // Use alternative position if it's non-zero and position 6 is zero
-        if (buttonId == 0x00 && altButtonId != 0x00) {
-          buttonId = altButtonId;
-          Serial.printf("🔄 Using button ID from position 3: 0x%02X\n", buttonId);
-        }
-        
-        // Also check for additional patterns or offsets
-        for (int i = 0; i < 60; i++) {
-          if (ctrl_report[i] == 0x43 && ctrl_report[i+1] == 0x01 && 
-              ctrl_report[i+2] == 0x00 && ctrl_report[i+3] == 0x00) {
-            Serial.printf("🔥 FOUND FULL PATTERN 43 01 00 00 at position %d, next byte: 0x%02X\n", 
-                         i, (i+4 < 64) ? ctrl_report[i+4] : 0xFF);
-          }
+        if (state == 0xC0) {
+          Serial.printf("🔴 Button pressed: 43 01 00 00 %02X C0 (ID=0x%02X)\n", buttonId, buttonId);
+        } else if (state == 0x40) {
+          Serial.printf("🔘 Button released: 43 01 00 00 %02X 40 (ID=0x%02X)\n", buttonId, buttonId);
         }
       }
       
@@ -1984,7 +1582,7 @@ public:
       atomQueuePut(queue, 0, &event);
     }
     
-    // restart the control-pipe…
+    // Restart the control polling
     if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) != 0) {
       ctrl_polling = false;
     }
@@ -2066,20 +1664,20 @@ public:
     delay(10);
     
     // Start polling Interface 3 Button (32 byte packets)
-    Serial.printf("📡 Starting button polling on EP 0x%02X...\n", btn_ep_in);
-    if (InterruptMessage(btn_ep_in, 32, btn_report, &btn_poll_cb) == 0) {
-      btn_polling = true;
-      Serial.println("✅ Button polling started successfully");
+    Serial.printf("📡 Starting hall sensor polling on EP 0x%02X...\n", hall_sensor_ep_in);
+    if (InterruptMessage(hall_sensor_ep_in, 32, hall_sensor_report, &hall_sensor_poll_cb) == 0) {
+      hall_sensor_polling = true;
+      Serial.println("✅ Hall sensor polling started successfully");
     } else {
-      Serial.println("❌ Failed to start button polling");
+      Serial.println("❌ Failed to start hall sensor polling");
     }
     
     delay(10);
     
     // Start polling Interface 3 Button Output (32 byte packets) - NEW!
     Serial.printf("📡 Starting button output polling on EP 0x%02X...\n", btn_ep_out);
-    if (InterruptMessage(btn_ep_out, 32, btn_out_report, &btn_out_poll_cb) == 0) {
-      btn_out_polling = true;
+    if (InterruptMessage(btn_ep_out, 32, sensor_out_report, &sensor_out_poll_cb) == 0) {
+      sensor_out_polling = true;
       Serial.println("✅ Button output polling started successfully");
     } else {
       Serial.println("❌ Failed to start button output polling");
@@ -2088,12 +1686,12 @@ public:
     delay(50);
     
     // Report polling status
-    Serial.printf("📊 Polling Status: kbd=%s, ctrl=%s, dual=%s, btn=%s, btn_out=%s\n",
+    Serial.printf("📊 Polling Status: kbd=%s, ctrl=%s, dual=%s, btn=%s, sensor_out=%s\n",
                   kbd_polling ? "✅" : "❌",
                   ctrl_polling ? "✅" : "❌", 
                   dual_polling ? "✅" : "❌",
-                  btn_polling ? "✅" : "❌",
-                  btn_out_polling ? "✅" : "❌");
+                  hall_sensor_polling ? "✅" : "❌",
+                  sensor_out_polling ? "✅" : "❌");
     
     if (ctrl_polling) {
       Serial.println("🎯 Control endpoint is polling! Device should now send 43 01 patterns on button press!");
@@ -2383,7 +1981,6 @@ public:
         // Failure logged internally
         return false;
     }
-    delay(10);
     return true;
   }
 
@@ -2415,27 +2012,13 @@ public:
     if (result > 0 && queue) {
       dual_counter++;
       
-      // Debug: Show dual packets occasionally AND check for 43 01 pattern
-      if (dual_counter % 50 == 1 || 
-          (dual_report[0] == 0x43 && dual_report[1] == 0x01)) {
+      // Debug: Show dual packets occasionally
+      if (dual_counter % 50 == 1) {
         Serial.printf("🎯 Dual poll #%d: ", dual_counter);
         for (int i = 0; i < min(16, result); i++) {
           Serial.printf("0x%02X ", dual_report[i]);
         }
         Serial.println();
-        
-        // Check for 43 01 pattern anywhere in first 8 bytes
-        for (int i = 0; i < min(6, result-1); i++) {
-          if (dual_report[i] == 0x43 && dual_report[i+1] == 0x01) {
-            Serial.printf("🔥 FOUND 43 01 at position %d in dual_poll!\n", i);
-            
-            // Check if this looks like button press format: 43 01 00 00 XX
-            if (i <= result-5 && dual_report[i+2] == 0x00 && dual_report[i+3] == 0x00) {
-              uint8_t buttonId = dual_report[i+4];
-              Serial.printf("🎯 POTENTIAL BUTTON PRESS: ID=0x%02X from dual_poll!\n", buttonId);
-            }
-          }
-        }
       }
       
       // Queue the dual event
@@ -2452,17 +2035,17 @@ public:
     }
   }
   
-  void btn_poll(int result) {
-    static int btn_counter = 0;
+  void hall_sensor_poll(int result) {
+    static int hall_sensor_counter = 0;
     
     if (result > 0 && queue) {
-      btn_counter++;
+      hall_sensor_counter++;
       
       // Debug: Show hall sensor data occasionally (this is Interface 3 - hall sensors, not button presses)
-      if (btn_counter % 20 == 1) {
-        Serial.printf("🔘 Hall sensor #%d: ", btn_counter);
+      if (hall_sensor_counter % 10 == 1) {
+        Serial.printf("🔘 Hall sensor #%d: ", hall_sensor_counter);
         for (int i = 0; i < min(16, result); i++) {
-          Serial.printf("0x%02X ", btn_report[i]);
+          Serial.printf("0x%02X ", hall_sensor_report[i]);
         }
         Serial.println();
       }
@@ -2473,64 +2056,43 @@ public:
       // Queue the hall sensor event
       controlpad_event event;
       result = min(result, 32);
-      memcpy(event.data, btn_report, result);
+      memcpy(event.data, hall_sensor_report, result);
       event.len = result;
       atomQueuePut(queue, 0, &event);
     }
     
     // Restart hall sensor polling
-    if (InterruptMessage(btn_ep_in, 32, btn_report, &btn_poll_cb) != 0) {
-      btn_polling = false;
+    if (InterruptMessage(hall_sensor_ep_in, 32, hall_sensor_report, &hall_sensor_poll_cb) != 0) {
+      hall_sensor_polling = false;
     }
   }
 
-  void btn_out_poll(int result) {
-    static int btn_out_counter = 0;
+  void sensor_out_poll(int result) {
+    static int sensor_out_counter = 0;
     
     if (result > 0 && queue) {
-      btn_out_counter++;
+      //sensor_out_counter++;
       
-      // Show endpoint 0x07 data and check for 43 01 patterns
-      if (btn_out_counter % 20 == 1 || 
-          (btn_out_report[0] == 0x43 && btn_out_report[1] == 0x01)) {
-        Serial.printf("🔄 EP 0x07 poll #%d: ", btn_out_counter);
-        for (int i = 0; i < min(16, result); i++) {
-          Serial.printf("0x%02X ", btn_out_report[i]);
-        }
-        Serial.println();
-      }
-      
-      // CHECK FOR 43 01 PATTERN IN ENDPOINT 0x07 DATA
-      for (int i = 0; i < min(28, result-1); i++) {
-        if (btn_out_report[i] == 0x43 && btn_out_report[i+1] == 0x01) {
-          Serial.printf("🔥 FOUND 43 01 at position %d in ENDPOINT 0x07!\n", i);
-          
-          // Check if this looks like button press format: 43 01 00 00 XX
-          if (i <= result-5 && btn_out_report[i+2] == 0x00 && btn_out_report[i+3] == 0x00) {
-            uint8_t buttonId = btn_out_report[i+4];
-            Serial.printf("🎯 REAL BUTTON PRESS: ID=0x%02X from ENDPOINT 0x07!\n", buttonId);
-            
-            // Process button press here
-            if (buttonId <= 0x17) {  // Valid button range 0x00-0x17
-              uint8_t buttonNumber = buttonId + 1;
-              Serial.printf("🎯 Triggering LED for button %d (ID=0x%02X)\n", buttonNumber, buttonId);
-              controlPadDriver->sendSimpleLEDTest(buttonNumber, 0, 255, 0);  // Green for EP 0x07
-            }
-          }
-        }
-      }
+      // Show endpoint 0x07 data occasionally
+      // if (sensor_out_counter % 20 == 1) {
+      //   Serial.printf("🔄 EP 0x07 poll #%d: ", sensor_out_counter);
+      //   for (int i = 0; i < min(16, result); i++) {
+      //     Serial.printf("0x%02X ", sensor_out_report[i]);
+      //   }
+      //   Serial.println();
+      // }
       
       // Queue the event
       controlpad_event event;
       result = min(result, 32);
-      memcpy(event.data, btn_out_report, result);
+      memcpy(event.data, sensor_out_report, result);
       event.len = result;
       atomQueuePut(queue, 0, &event);
     }
     
     // Restart endpoint 0x07 polling
-    if (InterruptMessage(btn_ep_out, 32, btn_out_report, &btn_out_poll_cb) != 0) {
-      btn_out_polling = false;
+    if (InterruptMessage(btn_ep_out, 32, sensor_out_report, &sensor_out_poll_cb) != 0) {
+      sensor_out_polling = false;
     }
   }
 
@@ -2567,13 +2129,15 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
   
-  Serial.println("\n🚀 Teensy4 USB Host ControlPad LED Controller 🚀");
-  Serial.println("==================================================");
-  Serial.println("🎯 DUAL INTERFACE POLLING - Complete Button Detection");
-  Serial.println("✅ Interface 0: Keyboard input (8-byte HID packets)");
-  Serial.println("✅ Interface 1: Control data + LED commands (64-byte packets)");
-  Serial.println("✅ Simultaneous polling on both endpoints");
-  Serial.println("Press keys 1-5 to trigger colored LED responses!");
+  Serial.println("\n🚀 Teensy4 USB Host ControlPad Button & LED Controller 🚀");
+  Serial.println("==========================================================");
+  Serial.println("🎯 MULTI-INTERFACE POLLING - Complete Device Control");
+  Serial.println("✅ Interface 0: Keyboard input (EP 0x81 - 8-byte HID packets)");
+  Serial.println("✅ Interface 1: Control/LED commands (EP 0x83/0x04 - 64-byte packets)");
+  Serial.println("✅ Interface 2: Dual action input (EP 0x82 - additional input)");
+  Serial.println("✅ Interface 3: Hall sensors (EP 0x86/0x07 - 32-byte packets)");
+  Serial.println("✅ Button detection with LED responses via Windows activation sequence");
+  Serial.println("Press buttons to see detection and hall sensor readings!");
   
   // Initialize queue for ControlPad events
   atomQueueCreate(&controlpad_queue, (uint8_t*)malloc(10 * sizeof(controlpad_event)), 10, sizeof(controlpad_event));
@@ -2583,86 +2147,38 @@ void setup() {
   // Initialize USB Host
   Serial.println("🔌 Starting USB Host...");
   usbHost.begin();
-  
   delay(2000);  // Give devices time to enumerate
-  
-  Serial.println("✅ USB Host initialized successfully");
-  Serial.println("🔧 Dual interface driver factory registered");
-  Serial.println("📊 Watch for BOTH keyboard AND control events...");
-  Serial.println("🎯 Should detect ALL button presses now!");
-
-  // COMMENTED OUT: Hall A on button 14 (interferes with button detection)
-  // controlPadDriver->enableHallOnButton(14, 0x04);
-  // Then in your ctrl_poll handler, read ctrl_report[1..2] for the 16-bit hall value
-
+  controlPadDriver->sendUSBInterfaceReSponseActivation();
+  Serial.println("✅ USB Host initialized and device activated successfully");
 }
 
 void loop() {
   static unsigned long lastTime = 0;
   static int loopCounter = 0;
-  static bool activationSent = false;
   
   loopCounter++;
-  
-  // Send delayed activation once after 3 seconds
-  if (!activationSent && millis() > 3000 && controlPadDriver && controlPadDriver->initialized) {
-    Serial.println("⏰ 3 seconds elapsed - sending delayed activation sequence...");
-    controlPadDriver->sendDelayedActivation();
-    activationSent = true;
-  }
-  
-  // Process all events from queue
-  controlpad_event event;
-  while (atomQueueGet(&controlpad_queue, 0, &event) == ATOM_OK) {
-    Serial.printf("🔍 EVENT #%d (len=%d)\n", loopCounter, event.len);
-    Serial.printf("📦 DATA: ");
-    for (int i = 0; i < min(16, (int)event.len); i++) {
-      Serial.printf("0x%02X ", event.data[i]);
-    }
-    Serial.println();
-    
-    // Scan for "43 01" pattern in queued events  
-    for (int i = 0; i < event.len - 1; i++) {
-      if (event.data[i] == 0x43 && event.data[i+1] == 0x01) {
-        Serial.printf("🔥 FOUND 43 01 in queued event at position %d!\n", i);
-        
-        // Check for USB capture pattern
-        if (i + 5 < event.len && 
-            event.data[i+2] == 0x00 && 
-            event.data[i+3] == 0x00 && 
-            event.data[i+5] == 0xc0) {
-          uint8_t buttonId = event.data[i+4];
-          Serial.printf("🚨 USB CAPTURE PATTERN IN QUEUE: 43 01 00 00 %02X c0 (Button ID: 0x%02X)\n", buttonId, buttonId);
-        if (controlPadDriver) {
-            controlPadDriver->sendGreenPattern();
-          }
-        }
-      }
-    }
-  }
-  
+   
   // Status update every 5 seconds
   unsigned long currentTime = millis();
   if (currentTime - lastTime > 5000) {
     lastTime = currentTime;
     
     if (controlPadDriver) {
-      Serial.printf("📊 Status: kbd=%s, ctrl=%s, dual=%s, btn=%s, btn_out=%s\n",
+      Serial.printf("📊 Status: kbd=%s, ctrl=%s, dual=%s, btn=%s, sensor_out=%s\n",
                     controlPadDriver->kbd_polling ? "✅" : "❌",
                     controlPadDriver->ctrl_polling ? "✅" : "❌",
                     controlPadDriver->dual_polling ? "✅" : "❌", 
-                    controlPadDriver->btn_polling ? "✅" : "❌",
-                    controlPadDriver->btn_out_polling ? "✅" : "❌");
+                    controlPadDriver->hall_sensor_polling ? "✅" : "❌",
+                    controlPadDriver->sensor_out_polling ? "✅" : "❌");
       
       if (!controlPadDriver->ctrl_polling) {
         Serial.println("🚨 CRITICAL: Control endpoint (0x83) not polling - attempting restart...");
         controlPadDriver->restartControlPolling();
-    } else {
-        Serial.println("✅ Control endpoint is polling - but no 43 01 data received yet");
+      } else {
+          Serial.println("✅ Control endpoint is polling");
+      }
     }
-  }
-} 
-  
+  }   
   delay(10);
 }
   
