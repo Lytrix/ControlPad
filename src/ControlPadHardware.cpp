@@ -23,6 +23,19 @@ USBControlPad::USBControlPad(USB_Device* dev)
       hall_sensor_poll_cb([this](int r) { hall_sensor_poll(r); }),
       sensor_out_poll_cb([this](int r) { sensor_out_poll(r); }),
       send_cb([this](int r) { sent(r); }) {
+    
+    // Initialize USB command serialization mutex for proper threading
+    usbCommandMutex = (ATOM_MUTEX*)malloc(sizeof(ATOM_MUTEX));
+    if (usbCommandMutex) {
+        if (atomMutexCreate(usbCommandMutex) == ATOM_OK) {
+            Serial.println("🔧 USB Command Mutex initialized");
+        } else {
+            free(usbCommandMutex);
+            usbCommandMutex = nullptr;
+            Serial.println("❌ Failed to create USB Command Mutex");
+        }
+    }
+    
     Serial.println("🔧 USBControlPad driver instance created");
 }
 
@@ -73,6 +86,13 @@ void USBControlPad::detach() {
     dual_polling = false;
     hall_sensor_polling = false;
     sensor_out_polling = false;
+    
+    // Clean up USB command mutex
+    if (usbCommandMutex) {
+        atomMutexDelete(usbCommandMutex);
+        free(usbCommandMutex);
+        usbCommandMutex = nullptr;
+    }
     
     // Reset static variable so a new driver can be created on reconnect
     driver_instance_created = false;
@@ -382,7 +402,7 @@ bool USBControlPad::sendUSBInterfaceReSponseActivation() {
     sendActivationCommandsForInterface(5, "52 00 activate effect modes");
     sendActivationCommandsForInterface(6, "41 80 repeat");
     sendActivationCommandsForInterface(7, "52 00 final");
-    setCustomMode();
+   // setCustomMode();
     return true;
 }
 
@@ -445,10 +465,8 @@ bool USBControlPad::sendActivationCommandsForInterface(int step, const char* des
     
     if (!success) {
         Serial.printf("❌ Activation command %02X %02X failed verification - retrying\n", expectedEcho1, expectedEcho2);
-        // Fallback to unverified send
-        int result = InterruptMessage(ctrl_ep_out, 64, cmd, &send_cb);
-        delay(10);  // Longer delay on failure
-        return (result == 0);
+        // Fallback to sendCommand() which includes mutex protection
+        return sendCommand(cmd, 64);
     }
     
     Serial.printf("✅ Activation command %02X %02X verified\n", expectedEcho1, expectedEcho2);
@@ -463,13 +481,24 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
         return false;
     }
     
+    // SIMPLIFIED: Remove mutex to test if it's causing issues
+    // if (usbCommandMutex) {
+    //     if (atomMutexGet(usbCommandMutex, 100) != ATOM_OK) {  // 100ms timeout
+    //         Serial.println("❌ USB Command Mutex timeout in sendCommand()");
+    //         return false;  // Failed to acquire mutex in time
+    //     }
+    // }
+    
     // Send via interrupt transfer to control endpoint
     int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
     
-    // PROPER USB ACK TIMING: Wait for device to process command
-    // Based on USB capture: Windows uses 8-15ms delays between commands
-    // This prevents device buffer overflow and system hangs
-    delay(1); // Optimized timing - reduced from 2ms for faster LED updates
+    // SIMPLIFIED: Minimal delay to test if timing is the issue
+   delay(2);
+    
+    // Release mutex after command completes
+    // if (usbCommandMutex) {
+    //     atomMutexPut(usbCommandMutex);
+    // }
     
     return (result == 0);
 }
@@ -477,6 +506,16 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
 bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2) {
     if (!initialized || length > 64) {
         return false;
+    }
+    
+    // SINGLE SERIALIZATION POINT: Use AtomThreads mutex for proper USB command flow
+    // This prevents the 100ms-1s timing interference window discovered by user
+    if (usbCommandMutex) {
+        // Use timeout instead of forever wait to prevent hangs
+        if (atomMutexGet(usbCommandMutex, 100) != ATOM_OK) {  // 100ms timeout
+            Serial.println("❌ USB Command Mutex timeout in sendLEDCommandWithVerification()");
+            return false;  // Failed to acquire mutex in time
+        }
     }
     
     // SEQUENTIAL MODE: Always use verification for reliable command sequencing
@@ -498,17 +537,27 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
     // Wait for echo verification with proper timeout for sequential processing
     unsigned long startTime = millis();
     while (!ledCommandVerified && (millis() - startTime) < 50) {  // Extended timeout for reliable ACK
-       // delay(1); // Small delay to prevent overwhelming USB polling
+        delay(1); // Small delay to prevent overwhelming USB polling
         yield(); // Allow other processing
     }
     
     if (!ledCommandVerified) {
         // Serial.printf("❌ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
+        // Release mutex on failure
+        if (usbCommandMutex) {
+            atomMutexPut(usbCommandMutex);
+        }
         return false;
     }
     
     // Proper delay for device processing to ensure ACK is complete
-    //delay(2);  // Sufficient time for device to process and prepare for next command
+    delay(2);  // Sufficient time for device to process and prepare for next command
+    
+    // Release USB command mutex on success
+    if (usbCommandMutex) {
+        atomMutexPut(usbCommandMutex);
+    }
+    
     return true;
 }
 
@@ -536,7 +585,7 @@ bool USBControlPad::setCustomMode() {
     };
     
     // Serial.println("🎨 Setting custom LED mode");
-    return sendLEDCommandWithVerification(cmd, 64, 0x56, 0x81);
+    return sendCommand(cmd, 64);
 }
 
 bool USBControlPad::setStaticMode() {
@@ -590,17 +639,10 @@ bool USBControlPad::sendLEDPackages(const ControlPadColor* colors) {
     
     // Button 18 (index 17) - only R component fits in package 1
     cmd1[pos++] = colors[17].r;  // Button 18 R
-    
-    // Send Package1 with verification (expect echo: 56 83) - WAIT for ACK
-    bool success1 = sendLEDCommandWithVerification(cmd1, 64, 0x56, 0x83);
-    
-    if (!success1) {
-        // Serial.println("❌ Package 1 (56 83 00) failed verification - retrying");
-        // Retry once more with verification
-        //delay(2); // Brief pause before retry
-        success1 = sendLEDCommandWithVerification(cmd1, 64, 0x56, 0x83);
-    }
-    
+    delay(1);
+    // Send Package1 WITHOUT verification - test if verification is the problem
+    bool success1 = sendCommand(cmd1, 64);
+      delay(1);
     // CRITICAL: Wait for Package 1 to be fully processed before sending Package 2
     if (success1) {
        // delay(5); // Longer gap between packages to prevent flicker during fast button transitions
@@ -635,27 +677,10 @@ bool USBControlPad::sendLEDPackages(const ControlPadColor* colors) {
     cmd2[pos++] = colors[9].r;   cmd2[pos++] = colors[9].g;   cmd2[pos++] = colors[9].b;   // Button 10
     cmd2[pos++] = colors[14].r;  cmd2[pos++] = colors[14].g;  cmd2[pos++] = colors[14].b;  // Button 15
     cmd2[pos++] = colors[19].r;  cmd2[pos++] = colors[19].g;  cmd2[pos++] = colors[19].b;  // Button 20
-        
-    // Send Package2 with verification (expect echo: 56 83) - SEQUENTIAL AFTER Package1
-    bool success2 = false;
-    if (success1) { // Only send Package2 if Package1 succeeded
-        success2 = sendLEDCommandWithVerification(cmd2, 64, 0x56, 0x83);
-        
-        if (!success2) {
-            // Serial.println("❌ Package 2 (56 83 01) failed verification - retrying");
-            // Retry once more with verification
-            delay(2); // Brief pause before retry
-            success2 = sendLEDCommandWithVerification(cmd2, 64, 0x56, 0x83);
-            
-            // If Package 2 still failed, this is critical for buttons 5,15,20,24
-            if (!success2) {
-                Serial.println("❌ CRITICAL: Package 2 failed after retry - Column 5 LEDs may flicker");
-            }
-        }
-    } else {
-        Serial.println("❌ CRITICAL: Package 1 failed - skipping Package 2 to prevent USB corruption");
-    }
-    
+  
+    // Send Package2 WITHOUT verification - test if verification is the problem
+    bool success2 = sendCommand(cmd2, 64);
+    delay(1);
     return (success1 && success2);
 }
 
@@ -665,8 +690,8 @@ bool USBControlPad::sendApplyCommand() {
         // Rest filled with zeros
     };
     
-    // Serial.println("🎨 Sending LED apply command with verification");
-    return sendCommandWithVerification(cmd, 64, 0x41, 0x80);
+    // Serial.println("🎨 Sending LED apply command WITHOUT verification");
+    return sendCommand(cmd, 64);
 }
 
 bool USBControlPad::sendFinalizeCommand() {
@@ -694,7 +719,7 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     bool success = true;
     
     // Command 1: Set custom mode (done once during initialization)
-    // success &= setCustomMode();
+     success &= setCustomMode();
     
           // Command 2: Send both LED packages consecutively 
       success &= sendLEDPackages(colors);
