@@ -38,24 +38,24 @@ void setup() {
     Serial.println("📌 Using new combined LED package system for reduced flicker");
     Serial.println("💡 Buttons will highlight in WHITE when pressed, then return to original colors");
 }
+uint32_t now = 0;
 
 void loop() {
     controlPad.poll();
     
     // Process all pending events
     ControlPadEvent event;
-    while (controlPad.pollEvent(event)) {
-        if (event.type == ControlPadEventType::Button) {
-            Serial.printf("🎯 Button %d %s (instant highlight)\n", 
-                         event.button.button + 1, 
-                         event.button.pressed ? "PRESSED" : "RELEASED");
-            
-            // INSTANT highlight with combined package system
-            // This should show WHITE highlighting over the rainbow colors
-            controlPad.setButtonHighlight(event.button.button, event.button.pressed);
+        while (controlPad.pollEvent(event)) {
+            if (event.type == ControlPadEventType::Button) {
+                Serial.printf("🎯 Button %d %s (instant highlight)\n", 
+                            event.button.button + 1, 
+                            event.button.pressed ? "PRESSED" : "RELEASED");
+                
+                // INSTANT highlight with combined package system
+                // This should show WHITE highlighting over the rainbow colors
+                controlPad.setButtonHighlight(event.button.button, event.button.pressed);
+            }
         }
-    }
-    
     // Small delay to prevent overwhelming the serial output
-    delay(1);
+    //delay(1);
 }

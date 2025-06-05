@@ -36,7 +36,7 @@ ControlPad::ControlPad() {
     ledsDirty = false;
     smartUpdatesEnabled = true;  // Enable by default
     lastUpdateTime = 0;
-    updateInterval = 50;  // Use 50ms intervals to match USB ACK timing and prevent overflow
+    updateInterval = 20;  // Use 20ms intervals for responsive LED feedback without USB conflicts
     ledUpdateInProgress = false;  // Initialize concurrency protection
     
     // Initialize per-LED dirty flags
@@ -90,7 +90,20 @@ void ControlPad::setLed(uint8_t index, const ControlPadColor& color) {
 
 void ControlPad::updateLeds() {
     // Serial.println("🚀 ControlPad::updateLeds() called - triggering hardware LED update");
-    hw->setAllLeds(ledState, CONTROLPAD_NUM_BUTTONS);
+    
+    // CRITICAL FIX: Don't bypass smart update system - use forceUpdate() instead
+    // This ensures all LED updates go through proper USB serialization
+    if (!hw) return;
+    
+    // Mark all LEDs as dirty and force immediate update through proper channels
+    for (int i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
+        currentColors[i] = ledState[i];  // Sync current colors with LED state
+        ledDirtyFlags[i] = true;
+    }
+    ledsDirty = true;
+    
+    // Force update through proper mutex-protected path
+    forceUpdate();
 }
 
 // Convenience methods for common patterns
@@ -167,7 +180,7 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
     
     // SIMPLE DEBOUNCING: Prevent button bounce
     unsigned long currentTime = millis();
-    if (currentTime - lastButtonTime[buttonIndex] < 50) {  // 50ms debounce
+    if (currentTime - lastButtonTime[buttonIndex] < 10) {  // 10ms debounce - reduced since no immediate USB conflicts
         return; // Skip bounce events
     }
     lastButtonTime[buttonIndex] = currentTime;
@@ -188,10 +201,9 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
         ledDirtyFlags[buttonIndex] = true;
         ledsDirty = true;
         
-        // IMMEDIATE UPDATE: Update LEDs right away for responsive feedback
-        if (smartUpdatesEnabled) {
-            updateSmartLeds();
-        }
+        // DEFERRED UPDATE: Don't update immediately during button events to prevent USB conflicts
+        // The LED update will happen during the next poll() cycle via updateSmartLeds()
+        // This prevents the 100ms-1s timing window where button USB events conflict with LED USB commands
     }
 }
 
@@ -208,10 +220,8 @@ void ControlPad::setButtonColor(uint8_t buttonIndex, const ControlPadColor& colo
         ledsDirty = true;
     }
     
-    // Auto-update if enabled - use force update to bypass settle time for single color changes
-    if (smartUpdatesEnabled) {
-        forceUpdate();  // Single color changes should be immediate
-    }
+    // Auto-update if enabled - but defer to prevent USB conflicts during button events
+    // The update will happen during the next poll() cycle
 }
 
 void ControlPad::setAllButtonColors(const ControlPadColor* colors) {
@@ -239,10 +249,8 @@ void ControlPad::setAllButtonColors(const ControlPadColor* colors) {
     if (anyChanged) {
         ledsDirty = true;
         
-        // Auto-update if enabled - use force update to bypass settle time for bulk changes
-        if (smartUpdatesEnabled) {
-            forceUpdate();  // Bulk color changes should be immediate
-        }
+        // Auto-update if enabled - but defer to prevent USB conflicts during button events
+        // The update will happen during the next poll() cycle
     }
 }
 
