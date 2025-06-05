@@ -87,6 +87,9 @@ private:
     volatile bool ledCommandVerified = false;
     uint8_t expectedLEDEcho[2] = {0};  // Expected echo bytes for commands
     bool fastModeEnabled = false;      // Skip verification during rapid updates
+    
+    // USB Command Serialization using AtomThreads primitives
+    ATOM_MUTEX* usbCommandMutex = nullptr;  // Single serialization point for all USB commands
 
     // Callback implementations
     void kbd_poll(int result);
