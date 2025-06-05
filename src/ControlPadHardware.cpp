@@ -122,7 +122,7 @@ void USBControlPad::startQuadPolling() {
         return; // Don't continue if this critical endpoint fails
     }
     
-    delay(100); // Longer delay between endpoint starts
+    delay(2); // Reduced delay - USB capture shows device responds in ~10-15ms
     
     // Start polling Interface 0 (Keyboard - 8 byte packets) - SECONDARY PRIORITY
     Serial.printf("📡 Starting keyboard polling on EP 0x%02X...\n", kbd_ep_in);
@@ -133,7 +133,7 @@ void USBControlPad::startQuadPolling() {
         Serial.println("⚠️ Keyboard polling failed - continuing without it");
     }
     
-    delay(100);
+    delay(2);
     
     Serial.println("🎯 Essential endpoints started - additional endpoints disabled for bandwidth");
     Serial.println("   (Dual action and hall sensor endpoints can be added later if needed)");
@@ -271,6 +271,24 @@ void USBControlPad::ctrl_poll(int result) {
             } else {
                 Serial.printf("❌ Invalid button ID: 0x%02X (valid range: 1-24)\n", buttonId);
             }
+        } 
+        // Check for command echoes: 56 8x (LED), 52 xx, 42 xx, 43 xx, 41 xx
+        else if (result >= 2 && (
+                (ctrl_report[0] == 0x56 && (ctrl_report[1] == 0x81 || ctrl_report[1] == 0x83)) ||  // LED commands
+                (ctrl_report[0] == 0x52) ||  // Effect mode commands
+                (ctrl_report[0] == 0x42) ||  // Activation commands 
+                (ctrl_report[0] == 0x43) ||  // Status commands
+                (ctrl_report[0] == 0x41)     // Finalize commands
+                )) {
+            // Command echo received - verify it matches expectations
+            if (expectedLEDEcho[0] == ctrl_report[0] && expectedLEDEcho[1] == ctrl_report[1]) {
+                ledCommandVerified = true;
+                // Serial.printf("✅ Command echo verified: %02X %02X\n", ctrl_report[0], ctrl_report[1]);
+            } else if (expectedLEDEcho[0] != 0x00) {  // Only report mismatch if we're expecting something
+                Serial.printf("❌ Command echo mismatch: expected %02X %02X, got %02X %02X\n",
+                             expectedLEDEcho[0], expectedLEDEcho[1], ctrl_report[0], ctrl_report[1]);
+            }
+            // If we got any command echo but weren't expecting it, silently ignore (stale echo)
         } else {
             // Don't process non-button events
             // Serial.printf("🚫 Ignoring non-button event (len=%d, header: %02X %02X %02X %02X)\n", 
@@ -364,7 +382,7 @@ bool USBControlPad::sendUSBInterfaceReSponseActivation() {
     sendActivationCommandsForInterface(5, "52 00 activate effect modes");
     sendActivationCommandsForInterface(6, "41 80 repeat");
     sendActivationCommandsForInterface(7, "52 00 final");
-    
+    setCustomMode();
     return true;
 }
 
@@ -418,11 +436,24 @@ bool USBControlPad::sendActivationCommandsForInterface(int step, const char* des
         return false;
     }
     
-    // Send the command
-    int result = InterruptMessage(ctrl_ep_out, 64, commands[step-1], &send_cb);
-    delay(50);  // Small delay between commands
+    // Send command with appropriate verification based on command type
+    uint8_t* cmd = commands[step-1];
+    uint8_t expectedEcho1 = cmd[0];  // First byte should be echoed back
+    uint8_t expectedEcho2 = cmd[1];  // Second byte should be echoed back
     
-    return (result == 0);
+    bool success = sendCommandWithVerification(cmd, 64, expectedEcho1, expectedEcho2);
+    
+    if (!success) {
+        Serial.printf("❌ Activation command %02X %02X failed verification - retrying\n", expectedEcho1, expectedEcho2);
+        // Fallback to unverified send
+        int result = InterruptMessage(ctrl_ep_out, 64, cmd, &send_cb);
+        delay(10);  // Longer delay on failure
+        return (result == 0);
+    }
+    
+    Serial.printf("✅ Activation command %02X %02X verified\n", expectedEcho1, expectedEcho2);
+    delay(25);  // Reduced delay since verification already handled timing
+    return true;
 }
 
 // ===== LED CONTROL COMMANDS =====
@@ -434,9 +465,65 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
     
     // Send via interrupt transfer to control endpoint
     int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
-    delay(10); // Small delay between commands
+    
+    // PROPER USB ACK TIMING: Wait for device to process command
+    // Based on USB capture: Windows uses 8-15ms delays between commands
+    // This prevents device buffer overflow and system hangs
+    delay(1); // Optimized timing - reduced from 2ms for faster LED updates
     
     return (result == 0);
+}
+
+bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2) {
+    if (!initialized || length > 64) {
+        return false;
+    }
+    
+    // SEQUENTIAL MODE: Always use verification for reliable command sequencing
+    // Clear any pending verification data and flush stale echoes
+    ledCommandVerified = false;
+    expectedLEDEcho[0] = expectedEcho1;
+    expectedLEDEcho[1] = expectedEcho2;
+    
+    // Brief delay to ensure any previous command echoes are processed
+   // delay(8);
+    
+    // Send the command
+    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
+    
+    if (result != 0) {
+        return false;
+    }
+    
+    // Wait for echo verification with proper timeout for sequential processing
+    unsigned long startTime = millis();
+    while (!ledCommandVerified && (millis() - startTime) < 50) {  // Extended timeout for reliable ACK
+       // delay(1); // Small delay to prevent overwhelming USB polling
+        yield(); // Allow other processing
+    }
+    
+    if (!ledCommandVerified) {
+        // Serial.printf("❌ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
+        return false;
+    }
+    
+    // Proper delay for device processing to ensure ACK is complete
+    //delay(2);  // Sufficient time for device to process and prepare for next command
+    return true;
+}
+
+bool USBControlPad::sendCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2) {
+    // This is an alias for sendLEDCommandWithVerification since the verification logic is the same
+    return sendLEDCommandWithVerification(data, length, expectedEcho1, expectedEcho2);
+}
+
+void USBControlPad::setFastMode(bool enabled) {
+    fastModeEnabled = enabled;
+    if (enabled) {
+        // Serial.println("⚡ Fast mode ENABLED - verification disabled for rapid updates");
+    } else {
+        // Serial.println("🔒 Fast mode DISABLED - verification enabled");
+    }
 }
 
 bool USBControlPad::setCustomMode() {
@@ -449,7 +536,7 @@ bool USBControlPad::setCustomMode() {
     };
     
     // Serial.println("🎨 Setting custom LED mode");
-    return sendCommand(cmd, 64);
+    return sendLEDCommandWithVerification(cmd, 64, 0x56, 0x81);
 }
 
 bool USBControlPad::setStaticMode() {
@@ -465,7 +552,175 @@ bool USBControlPad::setStaticMode() {
     return sendCommand(cmd, 64);
 }
 
+bool USBControlPad::sendLEDPackages(const ControlPadColor* colors) {
+    // COMBINED LED PACKAGE SENDING - Package1 and Package2 back-to-back
+    // This eliminates the gap between packages that causes flicker
+    // ===== PACKAGE 1 =====
+    uint8_t cmd1[64] = {
+        0x56, 0x83, 0x00, 0x00,    // Header
+        0x01, 0x00, 0x00, 0x00,    // Package 1 marker
+        0x80, 0x01, 0x00, 0x00,    // Control flags
+        0xff, 0x00, 0x00, 0x00,    // Color flags
+        0x00, 0x00,                // Reserved
+        0xff, 0xff,                // Brightness for all LEDs
+        0x00, 0x00, 0x00, 0x00     // Reserved
+    };
+    
+    // LED data starts at position 24 - direct assignments
+    size_t pos = 24;
+    
+    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20) - unrolled
+    cmd1[pos++] = colors[0].r;   cmd1[pos++] = colors[0].g;   cmd1[pos++] = colors[0].b;   // Button 1
+    cmd1[pos++] = colors[5].r;   cmd1[pos++] = colors[5].g;   cmd1[pos++] = colors[5].b;   // Button 6
+    cmd1[pos++] = colors[10].r;  cmd1[pos++] = colors[10].g;  cmd1[pos++] = colors[10].b;  // Button 11
+    cmd1[pos++] = colors[15].r;  cmd1[pos++] = colors[15].g;  cmd1[pos++] = colors[15].b;  // Button 16
+    cmd1[pos++] = colors[20].r;  cmd1[pos++] = colors[20].g;  cmd1[pos++] = colors[20].b;  // Button 21
+    
+    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21) - unrolled
+    cmd1[pos++] = colors[1].r;   cmd1[pos++] = colors[1].g;   cmd1[pos++] = colors[1].b;   // Button 2
+    cmd1[pos++] = colors[6].r;   cmd1[pos++] = colors[6].g;   cmd1[pos++] = colors[6].b;   // Button 7
+    cmd1[pos++] = colors[11].r;  cmd1[pos++] = colors[11].g;  cmd1[pos++] = colors[11].b;  // Button 12
+    cmd1[pos++] = colors[16].r;  cmd1[pos++] = colors[16].g;  cmd1[pos++] = colors[16].b;  // Button 17
+    cmd1[pos++] = colors[21].r;  cmd1[pos++] = colors[21].g;  cmd1[pos++] = colors[21].b;  // Button 22
+    
+    // Column 3: buttons 3,8,13 (indices 2,7,12) - unrolled  
+    cmd1[pos++] = colors[2].r;   cmd1[pos++] = colors[2].g;   cmd1[pos++] = colors[2].b;   // Button 3
+    cmd1[pos++] = colors[7].r;   cmd1[pos++] = colors[7].g;   cmd1[pos++] = colors[7].b;   // Button 8
+    cmd1[pos++] = colors[12].r;  cmd1[pos++] = colors[12].g;  cmd1[pos++] = colors[12].b;  // Button 13
+    
+    // Button 18 (index 17) - only R component fits in package 1
+    cmd1[pos++] = colors[17].r;  // Button 18 R
+    
+    // Send Package1 with verification (expect echo: 56 83) - WAIT for ACK
+    bool success1 = sendLEDCommandWithVerification(cmd1, 64, 0x56, 0x83);
+    
+    if (!success1) {
+        // Serial.println("❌ Package 1 (56 83 00) failed verification - retrying");
+        // Retry once more with verification
+        //delay(2); // Brief pause before retry
+        success1 = sendLEDCommandWithVerification(cmd1, 64, 0x56, 0x83);
+    }
+    
+    // CRITICAL: Wait for Package 1 to be fully processed before sending Package 2
+    if (success1) {
+       // delay(5); // Longer gap between packages to prevent flicker during fast button transitions
+    }
+
+    // ===== PACKAGE 2 =====
+    uint8_t cmd2[64] = {
+        0x56, 0x83, 0x01          // Header for package 2
+    };
+    
+    pos = 3;
+    
+    // Complete button 18 (index 17) - GB components
+    cmd2[pos++] = 0x00;  // Padding
+    cmd2[pos++] = colors[17].g;  // Button 18 G
+    cmd2[pos++] = colors[17].b;  // Button 18 B
+    
+    // Button 23 (index 22)
+    cmd2[pos++] = colors[22].r;
+    cmd2[pos++] = colors[22].g;
+    cmd2[pos++] = colors[22].b;
+    
+    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23) - unrolled
+    cmd2[pos++] = colors[3].r;   cmd2[pos++] = colors[3].g;   cmd2[pos++] = colors[3].b;   // Button 4
+    cmd2[pos++] = colors[8].r;   cmd2[pos++] = colors[8].g;   cmd2[pos++] = colors[8].b;   // Button 9
+    cmd2[pos++] = colors[13].r;  cmd2[pos++] = colors[13].g;  cmd2[pos++] = colors[13].b;  // Button 14
+    cmd2[pos++] = colors[18].r;  cmd2[pos++] = colors[18].g;  cmd2[pos++] = colors[18].b;  // Button 19
+    cmd2[pos++] = colors[23].r;  cmd2[pos++] = colors[23].g;  cmd2[pos++] = colors[23].b;  // Button 24
+    
+    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19) - unrolled
+    cmd2[pos++] = colors[4].r;   cmd2[pos++] = colors[4].g;   cmd2[pos++] = colors[4].b;   // Button 5
+    cmd2[pos++] = colors[9].r;   cmd2[pos++] = colors[9].g;   cmd2[pos++] = colors[9].b;   // Button 10
+    cmd2[pos++] = colors[14].r;  cmd2[pos++] = colors[14].g;  cmd2[pos++] = colors[14].b;  // Button 15
+    cmd2[pos++] = colors[19].r;  cmd2[pos++] = colors[19].g;  cmd2[pos++] = colors[19].b;  // Button 20
+        
+    // Send Package2 with verification (expect echo: 56 83) - SEQUENTIAL AFTER Package1
+    bool success2 = false;
+    if (success1) { // Only send Package2 if Package1 succeeded
+        success2 = sendLEDCommandWithVerification(cmd2, 64, 0x56, 0x83);
+        
+        if (!success2) {
+            // Serial.println("❌ Package 2 (56 83 01) failed verification - retrying");
+            // Retry once more with verification
+            delay(2); // Brief pause before retry
+            success2 = sendLEDCommandWithVerification(cmd2, 64, 0x56, 0x83);
+            
+            // If Package 2 still failed, this is critical for buttons 5,15,20,24
+            if (!success2) {
+                Serial.println("❌ CRITICAL: Package 2 failed after retry - Column 5 LEDs may flicker");
+            }
+        }
+    } else {
+        Serial.println("❌ CRITICAL: Package 1 failed - skipping Package 2 to prevent USB corruption");
+    }
+    
+    return (success1 && success2);
+}
+
+bool USBControlPad::sendApplyCommand() {
+    uint8_t cmd[64] = {
+        0x41, 0x80  // Apply/confirm command
+        // Rest filled with zeros
+    };
+    
+    // Serial.println("🎨 Sending LED apply command with verification");
+    return sendCommandWithVerification(cmd, 64, 0x41, 0x80);
+}
+
+bool USBControlPad::sendFinalizeCommand() {
+    uint8_t cmd[64] = {
+        0x51, 0x28, 0x00, 0x00,
+        0xff, 0x00  // Finalize pattern
+        // Rest filled with zeros
+    };
+    
+    // Serial.println("🎨 Sending LED finalize command");
+    return sendCommand(cmd, 64);
+}
+
+bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
+    if (!initialized || count > 24) {
+        // Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
+        return false;
+    }
+    
+    // ULTRA-FAST 3-COMMAND SEQUENCE - Minimizes USB traffic and flicker
+    // 1. Custom Mode
+    // 2. Combined LED Packages (Package1 + Package2 back-to-back)  
+    // 3. Apply + Finalize back-to-back
+    
+    bool success = true;
+    
+    // Command 1: Set custom mode (done once during initialization)
+    // success &= setCustomMode();
+    
+          // Command 2: Send both LED packages consecutively 
+      success &= sendLEDPackages(colors);
+      
+      // Small delay before apply command to prevent USB command conflicts during fast button transitions
+      //delay(3);
+      
+      // Command 3: Apply command
+      success &= sendApplyCommand();
+    
+    // Command 4: Finalize command  
+    success &= sendFinalizeCommand();
+    
+    // if (success) {
+    //     Serial.println("✅ Ultra-fast LED update sequence completed");
+    // } else {
+    //     Serial.println("❌ Ultra-fast LED update sequence failed");
+    // }
+    
+    return success;
+}
+
 bool USBControlPad::sendLEDPackage1(const ControlPadColor* colors) {
+    // DEPRECATED: Use sendLEDPackages() instead for better performance
+    // This function is kept for backwards compatibility only
+    
     uint8_t cmd[64] = {
         0x56, 0x83, 0x00, 0x00,    // Header
         0x01, 0x00, 0x00, 0x00,    // Package 1 marker
@@ -506,6 +761,9 @@ bool USBControlPad::sendLEDPackage1(const ControlPadColor* colors) {
 }
 
 bool USBControlPad::sendLEDPackage2(const ControlPadColor* colors) {
+    // DEPRECATED: Use sendLEDPackages() instead for better performance
+    // This function is kept for backwards compatibility only
+    
     uint8_t cmd[64] = {
         0x56, 0x83, 0x01          // Header for package 2
     };
@@ -539,58 +797,6 @@ bool USBControlPad::sendLEDPackage2(const ControlPadColor* colors) {
     
     // Serial.println("🎨 Sending LED Package 2");
     return sendCommand(cmd, 64);
-}
-
-bool USBControlPad::sendApplyCommand() {
-    uint8_t cmd[64] = {
-        0x41, 0x80  // Apply/confirm command
-        // Rest filled with zeros
-    };
-    
-    // Serial.println("🎨 Sending LED apply command");
-    return sendCommand(cmd, 64);
-}
-
-bool USBControlPad::sendFinalizeCommand() {
-    uint8_t cmd[64] = {
-        0x51, 0x28, 0x00, 0x00,
-        0xff, 0x00  // Finalize pattern
-        // Rest filled with zeros
-    };
-    
-    // Serial.println("🎨 Sending LED finalize command");
-    return sendCommand(cmd, 64);
-}
-
-bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
-    if (!initialized || count > 24) {
-        // Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
-        return false;
-    }
-    
-    // Serial.printf("🌈 Updating all %zu LEDs with 5-command sequence\n", count);
-    
-    // Use the colors directly - no intermediate copying
-    // Execute the 5-command sequence with no delays
-    bool success = true;
-    
-    success &= setCustomMode();
-    
-    success &= sendLEDPackage1(colors);
-
-    success &= sendLEDPackage2(colors);
-    
-    success &= sendApplyCommand();
-    
-    success &= sendFinalizeCommand();
-    
-    // if (success) {
-    //     Serial.println("✅ LED update sequence completed successfully");
-    // } else {
-    //     Serial.println("❌ LED update sequence failed");
-    // }
-    
-    return success;
 }
 
 // ===== HARDWARE MANAGER IMPLEMENTATION =====
@@ -706,5 +912,11 @@ void ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count)
         // }
     } else {
         // Serial.println("❌ No USB driver available for LED update");
+    }
+}
+
+void ControlPadHardware::setFastMode(bool enabled) {
+    if (controlPadDriver) {
+        controlPadDriver->setFastMode(enabled);
     }
 }

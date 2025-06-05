@@ -77,6 +77,16 @@ private:
     bool hall_sensor_polling = false;
     bool sensor_out_polling = false;
     bool initialized = false;
+    
+    // USB ACK synchronization system for flickerless LED updates
+    volatile bool commandAckReceived = false;
+    volatile int lastCommandResult = 0;
+    unsigned long commandTimeout = 100; // 100ms timeout for USB ACK
+    
+    // Command verification system (LED, activation, effect modes)
+    volatile bool ledCommandVerified = false;
+    uint8_t expectedLEDEcho[2] = {0};  // Expected echo bytes for commands
+    bool fastModeEnabled = false;      // Skip verification during rapid updates
 
     // Callback implementations
     void kbd_poll(int result);
@@ -106,10 +116,14 @@ public:
     
     // LED control commands
     bool sendCommand(const uint8_t* data, size_t length);
+    bool sendLEDCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2);
+    bool sendCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2);
+    void setFastMode(bool enabled);    // Enable/disable fast mode for rapid updates
     bool setCustomMode();
     bool setStaticMode();
-    bool sendLEDPackage1(const ControlPadColor* colors);
-    bool sendLEDPackage2(const ControlPadColor* colors);
+    bool sendLEDPackages(const ControlPadColor* colors);  // Combined Package1+Package2 for flickerless operation
+    bool sendLEDPackage1(const ControlPadColor* colors); // Deprecated - use sendLEDPackages instead
+    bool sendLEDPackage2(const ControlPadColor* colors); // Deprecated - use sendLEDPackages instead
     bool sendApplyCommand();
     bool sendFinalizeCommand();
     bool updateAllLEDs(const ControlPadColor* colors, size_t count);
@@ -130,6 +144,7 @@ public:
 
     // Only called by API layer
     void setAllLeds(const ControlPadColor* colors, size_t count);
+    void setFastMode(bool enabled);  // Enable/disable fast mode for rapid updates
 
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
     ControlPad* currentPad = nullptr;
