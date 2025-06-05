@@ -131,6 +131,9 @@ public:
     // Only called by API layer
     void setAllLeds(const ControlPadColor* colors, size_t count);
 
+    // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
+    ControlPad* currentPad = nullptr;
+
 private:
     // USB driver instance (managed by this class)
     USBControlPad* usbDriver = nullptr;
