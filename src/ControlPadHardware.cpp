@@ -7,6 +7,9 @@ static DMAMEM TeensyUSBHost2 usbHost;
 // Global driver instance pointer (defined here, declared in header as extern)
 USBControlPad* controlPadDriver = nullptr;
 
+// Global hardware instance for access from USB callbacks
+ControlPadHardware* globalHardwareInstance = nullptr;
+
 // Static member definitions for USBControlPad
 bool USBControlPad::driver_instance_created = false;
 
@@ -191,21 +194,95 @@ void USBControlPad::ctrl_poll(int result) {
             uint8_t buttonId = ctrl_report[4];
             uint8_t state = ctrl_report[5];
             
-            if (state == 0xC0) {
-                Serial.printf("🔴 Button pressed: ID=0x%02X\n", buttonId);
-            } else if (state == 0x40) {
-                Serial.printf("🔘 Button released: ID=0x%02X\n", buttonId);
+            // Filter out spurious events and only process valid button states
+            if (state != 0xC0 && state != 0x40) {
+                goto restart_polling; // Skip invalid states
             }
+            
+            // Only log valid button events (minimal output)
+            if (state == 0xC0) {
+                // Serial.printf("🔴 Button pressed: ID=0x%02X\n", buttonId);
+            } else if (state == 0x40) {
+                // Serial.printf("🔘 Button released: ID=0x%02X\n", buttonId);
+            }
+            
+            // IMMEDIATE PROCESSING: Convert USB button event to ControlPad event right here
+            // This bypasses the problematic USB queue entirely
+            
+            // Skip spurious USB ID 0x00
+            if (buttonId == 0x00) {
+                goto restart_polling;
+            }
+            
+            if (buttonId >= 1 && buttonId <= 24) {  // Valid button range 1-24
+                // CORRECT COLUMN-MAJOR MAPPING based on LED data structure:
+                // Physical layout is 5x5 grid, but LED data is sent column-wise
+                // Column 1: buttons 1,6,11,16,21 → LED indices 0,1,2,3,4
+                // Column 2: buttons 2,7,12,17,22 → LED indices 5,6,7,8,9
+                // Column 3: buttons 3,8,13,18,23 → LED indices 10,11,12,13,14
+                // Column 4: buttons 4,9,14,19,24 → LED indices 15,16,17,18,19
+                // Column 5: buttons 5,10,15,20 → LED indices 20,21,22,23
+                
+                //uint8_t physicalButton = buttonId;  // USB sends 1-24
+                //uint8_t buttonZeroBased = physicalButton;  // Keep as-is since other buttons work
+                uint8_t row = buttonId / 5;  // Row (0-4)
+                uint8_t col = buttonId % 5;  // Column (0-4)
+                
+                // Direct mapping without offsets since user's adjustments work
+                uint8_t verticalIndex = col * 5 + row;  // LED index in column-major order
+                
+                // Special fix for button 1 - it should map to LED index 0
+                //if (physicalButton == 1) {
+                 //   verticalIndex = 1;  // Force button 1 to LED 1 (index 0)
+                //}
+                
+                // Minimal logging - show the mapping calculation
+                // if (state == 0xC0) {
+                //     Serial.printf("BTN %d PRESS (USB:0x%02X, row:%d, col:%d → LED:%d)\n", 
+                //                  buttonId, buttonId, row, col, verticalIndex + 1);
+                // }
+                
+                ControlPadEvent event;
+                event.type = ControlPadEventType::Button;
+                event.button.button = verticalIndex;
+                
+                if (state == 0xC0) {
+                    event.button.pressed = true;
+                    // Serial.printf("🎯 IMMEDIATE Event: Physical Button %d PRESSED (USB ID: 0x%02X, vertical index: %d)\n", 
+                    //              verticalIndex + 1, buttonId, verticalIndex);
+                } else if (state == 0x40) {
+                    event.button.pressed = false;
+                    // Serial.printf("🎯 IMMEDIATE Event: Physical Button %d RELEASED (USB ID: 0x%02X, vertical index: %d)\n", 
+                    //              verticalIndex + 1, buttonId, verticalIndex);
+                } else {
+                    // Unknown state, skip
+                    // Serial.printf("❌ Unknown button state: 0x%02X\n", state);
+                    goto restart_polling; // Skip to restart polling
+                }
+                
+                // Get the global ControlPadHardware instance to access currentPad
+                if (globalHardwareInstance && globalHardwareInstance->currentPad) {
+                    // Serial.println("🔧 IMMEDIATE: About to push event directly to ControlPad");
+                    globalHardwareInstance->currentPad->pushEvent(event);
+                    // Serial.println("🔧 IMMEDIATE: Event pushed successfully");
+                } else {
+                    // Serial.println("❌ IMMEDIATE: No ControlPad instance available");
+                }
+            } else {
+                Serial.printf("❌ Invalid button ID: 0x%02X (valid range: 1-24)\n", buttonId);
+            }
+        } else {
+            // Don't process non-button events
+            // Serial.printf("🚫 Ignoring non-button event (len=%d, header: %02X %02X %02X %02X)\n", 
+            //              result, 
+            //              result > 0 ? ctrl_report[0] : 0,
+            //              result > 1 ? ctrl_report[1] : 0,
+            //              result > 2 ? ctrl_report[2] : 0,
+            //              result > 3 ? ctrl_report[3] : 0);
         }
-        
-        // Queue the control event
-        controlpad_event event;
-        result = min(result, 64);
-        memcpy(event.data, ctrl_report, result);
-        event.len = result;
-        atomQueuePut(queue, 0, &event);
     }
     
+    restart_polling:
     // Restart the control polling
     if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) != 0) {
         ctrl_polling = false;
@@ -267,10 +344,10 @@ void USBControlPad::sent(int result) {
     if (result >= 0) {
         // Only show every 10th success to reduce spam
         if (commandCounter <= 5 || commandCounter % 10 == 0) {
-            Serial.printf("📤 Command #%d sent successfully\n", commandCounter);
+            // Serial.printf("📤 Command #%d sent successfully\n", commandCounter);
         }
     } else {
-        Serial.printf("❌ Command #%d FAILED: %d\n", commandCounter, result);
+        // Serial.printf("❌ Command #%d FAILED: %d\n", commandCounter, result);
     }
 }
 
@@ -371,7 +448,7 @@ bool USBControlPad::setCustomMode() {
         // Rest filled with zeros
     };
     
-    Serial.println("🎨 Setting custom LED mode");
+    // Serial.println("🎨 Setting custom LED mode");
     return sendCommand(cmd, 64);
 }
 
@@ -384,7 +461,7 @@ bool USBControlPad::setStaticMode() {
         // Rest filled with zeros
     };
     
-    Serial.println("🎨 Setting static LED mode");
+    // Serial.println("🎨 Setting static LED mode");
     return sendCommand(cmd, 64);
 }
 
@@ -399,39 +476,32 @@ bool USBControlPad::sendLEDPackage1(const ControlPadColor* colors) {
         0x00, 0x00, 0x00, 0x00     // Reserved
     };
     
-    // LED data starts at position 24
+    // LED data starts at position 24 - direct assignments without loops
     size_t pos = 24;
     
-    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20)
-    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
-        int btnIdx = i * 5;  // 0,5,10,15,20
-        cmd[pos++] = colors[btnIdx].r;
-        cmd[pos++] = colors[btnIdx].g;
-        cmd[pos++] = colors[btnIdx].b;
-    }
+    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20) - unrolled
+    cmd[pos++] = colors[0].r;   cmd[pos++] = colors[0].g;   cmd[pos++] = colors[0].b;   // Button 1
+    cmd[pos++] = colors[5].r;   cmd[pos++] = colors[5].g;   cmd[pos++] = colors[5].b;   // Button 6
+    cmd[pos++] = colors[10].r;  cmd[pos++] = colors[10].g;  cmd[pos++] = colors[10].b;  // Button 11
+    cmd[pos++] = colors[15].r;  cmd[pos++] = colors[15].g;  cmd[pos++] = colors[15].b;  // Button 16
+    cmd[pos++] = colors[20].r;  cmd[pos++] = colors[20].g;  cmd[pos++] = colors[20].b;  // Button 21
     
-    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21)
-    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
-        int btnIdx = 1 + i * 5;  // 1,6,11,16,21
-        cmd[pos++] = colors[btnIdx].r;
-        cmd[pos++] = colors[btnIdx].g;
-        cmd[pos++] = colors[btnIdx].b;
-    }
+    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21) - unrolled
+    cmd[pos++] = colors[1].r;   cmd[pos++] = colors[1].g;   cmd[pos++] = colors[1].b;   // Button 2
+    cmd[pos++] = colors[6].r;   cmd[pos++] = colors[6].g;   cmd[pos++] = colors[6].b;   // Button 7
+    cmd[pos++] = colors[11].r;  cmd[pos++] = colors[11].g;  cmd[pos++] = colors[11].b;  // Button 12
+    cmd[pos++] = colors[16].r;  cmd[pos++] = colors[16].g;  cmd[pos++] = colors[16].b;  // Button 17
+    cmd[pos++] = colors[21].r;  cmd[pos++] = colors[21].g;  cmd[pos++] = colors[21].b;  // Button 22
     
-    // Column 3: buttons 3,8,13 (indices 2,7,12) + partial button 18 (index 17)
-    for (int i = 0; i < 3 && pos + 2 < 64; i++) {
-        int btnIdx = 2 + i * 5;  // 2,7,12
-        cmd[pos++] = colors[btnIdx].r;
-        cmd[pos++] = colors[btnIdx].g;
-        cmd[pos++] = colors[btnIdx].b;
-    }
+    // Column 3: buttons 3,8,13 (indices 2,7,12) - unrolled  
+    cmd[pos++] = colors[2].r;   cmd[pos++] = colors[2].g;   cmd[pos++] = colors[2].b;   // Button 3
+    cmd[pos++] = colors[7].r;   cmd[pos++] = colors[7].g;   cmd[pos++] = colors[7].b;   // Button 8
+    cmd[pos++] = colors[12].r;  cmd[pos++] = colors[12].g;  cmd[pos++] = colors[12].b;  // Button 13
     
     // Button 18 (index 17) - only R component fits in package 1
-    if (pos < 64) {
-        cmd[pos++] = colors[17].r;  // Button 18 R
-    }
+    cmd[pos++] = colors[17].r;  // Button 18 R
     
-    Serial.println("🎨 Sending LED Package 1");
+    // Serial.println("🎨 Sending LED Package 1");
     return sendCommand(cmd, 64);
 }
 
@@ -452,25 +522,22 @@ bool USBControlPad::sendLEDPackage2(const ControlPadColor* colors) {
     cmd[pos++] = colors[22].g;
     cmd[pos++] = colors[22].b;
     
-    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23)
-    for (int i = 0; i < 5 && pos + 2 < 64; i++) {
-        int btnIdx = 3 + i * 5;  // 3,8,13,18,23
-        cmd[pos++] = colors[btnIdx].r;
-        cmd[pos++] = colors[btnIdx].g;
-        cmd[pos++] = colors[btnIdx].b;
-    }
+    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23) - unrolled
+    cmd[pos++] = colors[3].r;   cmd[pos++] = colors[3].g;   cmd[pos++] = colors[3].b;   // Button 4
+    cmd[pos++] = colors[8].r;   cmd[pos++] = colors[8].g;   cmd[pos++] = colors[8].b;   // Button 9
+    cmd[pos++] = colors[13].r;  cmd[pos++] = colors[13].g;  cmd[pos++] = colors[13].b;  // Button 14
+    cmd[pos++] = colors[18].r;  cmd[pos++] = colors[18].g;  cmd[pos++] = colors[18].b;  // Button 19
+    cmd[pos++] = colors[23].r;  cmd[pos++] = colors[23].g;  cmd[pos++] = colors[23].b;  // Button 24
     
-    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19) - button 24 is double width
-    for (int i = 0; i < 4 && pos + 2 < 64; i++) {
-        int btnIdx = 4 + i * 5;  // 4,9,14,19
-        cmd[pos++] = colors[btnIdx].r;
-        cmd[pos++] = colors[btnIdx].g;
-        cmd[pos++] = colors[btnIdx].b;
-    }
+    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19) - unrolled
+    cmd[pos++] = colors[4].r;   cmd[pos++] = colors[4].g;   cmd[pos++] = colors[4].b;   // Button 5
+    cmd[pos++] = colors[9].r;   cmd[pos++] = colors[9].g;   cmd[pos++] = colors[9].b;   // Button 10
+    cmd[pos++] = colors[14].r;  cmd[pos++] = colors[14].g;  cmd[pos++] = colors[14].b;  // Button 15
+    cmd[pos++] = colors[19].r;  cmd[pos++] = colors[19].g;  cmd[pos++] = colors[19].b;  // Button 20
     
     // Rest filled with zeros (already initialized)
     
-    Serial.println("🎨 Sending LED Package 2");
+    // Serial.println("🎨 Sending LED Package 2");
     return sendCommand(cmd, 64);
 }
 
@@ -480,7 +547,7 @@ bool USBControlPad::sendApplyCommand() {
         // Rest filled with zeros
     };
     
-    Serial.println("🎨 Sending LED apply command");
+    // Serial.println("🎨 Sending LED apply command");
     return sendCommand(cmd, 64);
 }
 
@@ -491,47 +558,37 @@ bool USBControlPad::sendFinalizeCommand() {
         // Rest filled with zeros
     };
     
-    Serial.println("🎨 Sending LED finalize command");
+    // Serial.println("🎨 Sending LED finalize command");
     return sendCommand(cmd, 64);
 }
 
 bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     if (!initialized || count > 24) {
-        Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
+        // Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
         return false;
     }
     
-    Serial.printf("🌈 Updating all %zu LEDs with 5-command sequence\n", count);
+    // Serial.printf("🌈 Updating all %zu LEDs with 5-command sequence\n", count);
     
-    // Ensure we have 24 colors (pad with black if necessary)
-    ControlPadColor fullColors[24] = {};
-    for (size_t i = 0; i < count && i < 24; i++) {
-        fullColors[i] = colors[i];
-    }
-    
-    // Execute the 5-command sequence
+    // Use the colors directly - no intermediate copying
+    // Execute the 5-command sequence with no delays
     bool success = true;
     
     success &= setCustomMode();
-    delay(12);
     
-    success &= sendLEDPackage1(fullColors);
-    delay(11);
-    
-    success &= sendLEDPackage2(fullColors);
-    delay(12);
+    success &= sendLEDPackage1(colors);
+
+    success &= sendLEDPackage2(colors);
     
     success &= sendApplyCommand();
-    delay(9);
     
     success &= sendFinalizeCommand();
-    delay(10);
     
-    if (success) {
-        Serial.println("✅ LED update sequence completed successfully");
-    } else {
-        Serial.println("❌ LED update sequence failed");
-    }
+    // if (success) {
+    //     Serial.println("✅ LED update sequence completed successfully");
+    // } else {
+    //     Serial.println("❌ LED update sequence failed");
+    // }
     
     return success;
 }
@@ -540,6 +597,7 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
 
 ControlPadHardware::ControlPadHardware() {
     // Constructor - initialize any hardware-specific settings
+    globalHardwareInstance = this;  // Set global instance for USB callbacks
 }
 
 ControlPadHardware::~ControlPadHardware() {
@@ -549,6 +607,9 @@ ControlPadHardware::~ControlPadHardware() {
 }
 
 bool ControlPadHardware::begin(ControlPad& pad) {
+    // Store reference to the ControlPad instance
+    currentPad = &pad;
+    
     // 1. Initialize queue
     controlpad_queue_data = (controlpad_event*)malloc(10 * sizeof(controlpad_event));
     if (!controlpad_queue_data) {
@@ -618,23 +679,32 @@ bool ControlPadHardware::begin(ControlPad& pad) {
 }
 
 void ControlPadHardware::poll() {
-    // Poll hardware, handle events, etc.
-    // This is optional - the USB callbacks handle most polling
+    // Events are now processed immediately in USB callbacks
+    // This method is kept for compatibility but doesn't need to do anything
+    // The USB driver handles everything automatically
+    
+    // Optional: Just verify the driver is still running
+    if (controlPadDriver && controlPadDriver->initialized) {
+        // USB driver is running, events are being processed in callbacks
+        return;
+    } else {
+        Serial.println("🔧 ControlPadHardware::poll() - Driver not available");
+    }
 }
 
 void ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count) {
     // Send the full LED state to the hardware using the new 5-command sequence
-    Serial.printf("🎨 Hardware: Setting %zu LEDs\n", count);
+    // Serial.printf("🎨 Hardware: Setting %zu LEDs\n", count);
     
     // Use the USB driver to send the LED update
     if (controlPadDriver) {
         bool success = controlPadDriver->updateAllLEDs(colors, count);
-        if (success) {
-            Serial.println("✅ LED update completed via USB driver");
-        } else {
-            Serial.println("❌ LED update failed via USB driver");
-        }
+        // if (success) {
+        //     Serial.println("✅ LED update completed via USB driver");
+        // } else {
+        //     Serial.println("❌ LED update failed via USB driver");
+        // }
     } else {
-        Serial.println("❌ No USB driver available for LED update");
+        // Serial.println("❌ No USB driver available for LED update");
     }
 }

@@ -62,6 +62,9 @@ public:
     // Event API
     bool pollEvent(ControlPadEvent& event); // Polling
     void onEvent(ControlPadEventCallback cb); // Callback
+    
+    // Internal: called by hardware layer (made public for USB callbacks)
+    void pushEvent(const ControlPadEvent& event);
 
     // (Optional) Event callbacks for button/hall changes
     // void onButtonChange(void (*callback)(uint8_t button, bool pressed));
@@ -81,9 +84,6 @@ private:
 
     // Hardware layer
     ControlPadHardware* hw = nullptr;
-
-    // Internal: called by hardware layer
-    void pushEvent(const ControlPadEvent& event);
 
     // Friend hardware layer if needed
     friend class ControlPadHardware;
