@@ -50,9 +50,18 @@ public:
     int  getHallValue(uint8_t sensor) const;
 
     // LED control
-    void setLed(uint8_t button, uint8_t r, uint8_t g, uint8_t b);
-    void setAllLeds(const ControlPadColor colors[CONTROLPAD_NUM_BUTTONS]);
+    void setLed(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
+    void setLed(uint8_t index, const ControlPadColor& color);
     void updateLeds();
+    
+    // Smart LED management
+    void setButtonHighlight(uint8_t buttonIndex, bool pressed);
+    void setButtonColor(uint8_t buttonIndex, const ControlPadColor& color);
+    void setAllButtonColors(const ControlPadColor* colors);
+    void enableSmartUpdates(bool enable = true);
+    void setUpdateInterval(unsigned long intervalMs);  // Configure update rate
+    void enableInstantUpdates(bool instant = true);    // Disable all rate limiting
+    void forceUpdate();
     
     // Convenience methods for common patterns
     void setAllLedsOff();
@@ -79,6 +88,23 @@ private:
     static const size_t EVENT_QUEUE_SIZE = 16;
     ControlPadEvent eventQueue[EVENT_QUEUE_SIZE];
     size_t eventHead = 0, eventTail = 0;
+    
+    // Smart LED management system
+    ControlPadColor baseColors[CONTROLPAD_NUM_BUTTONS];    // Original button colors
+    ControlPadColor currentColors[CONTROLPAD_NUM_BUTTONS]; // Current LED state
+    bool buttonHighlighted[CONTROLPAD_NUM_BUTTONS];        // Which buttons are highlighted
+    bool ledsDirty;                                        // Whether LEDs need updating
+    bool ledDirtyFlags[CONTROLPAD_NUM_BUTTONS];           // Per-LED dirty tracking
+    bool smartUpdatesEnabled;                              // Enable automatic smart updates
+    bool ledUpdateInProgress;                              // Prevent concurrent updates
+    unsigned long lastUpdateTime;                          // Last LED update timestamp
+    unsigned long lastButtonTime[CONTROLPAD_NUM_BUTTONS]; // Debounce timing per button
+    unsigned long updateInterval;                          // Minimum time between updates
+    
+    // Internal smart LED methods
+    void updateSmartLeds();
+    bool hasLedChanges();
+    void markLedsClean();
 
     ControlPadEventCallback eventCallback = nullptr;
 
