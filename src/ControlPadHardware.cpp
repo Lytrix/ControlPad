@@ -482,7 +482,7 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
         int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
         
         // CRITICAL: Device needs time to process LED commands - but use minimal delay
-        delayMicroseconds(825); // Back to working timing that doesn't black out
+        delayMicroseconds(850); // Back to working timing that doesn't black out
         return (result == 0);
     }
     
@@ -760,9 +760,9 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     // SIMPLE LED UPDATE - Remove all unnecessary complexity
     pauseUSBPolling();
     bool success = true;
-    
     // Essential commands only - no extra delays
     success &= sendLEDPackages(colors);
+    delayMicroseconds(850);
     success &= sendApplyCommand();
     success &= sendFinalizeCommand();
     
