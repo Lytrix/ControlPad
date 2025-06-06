@@ -1,85 +1,88 @@
 #include "ControlPadHardware.h"
-#include <teensy4_usbhost.h>
-
-// Global USB host instance
-static DMAMEM TeensyUSBHost2 usbHost;
-
-// Global driver instance pointer (defined here, declared in header as extern)
-USBControlPad* controlPadDriver = nullptr;
+#include <USBHost_t36.h>  // For testing with standard drivers
 
 // Global hardware instance for access from USB callbacks
 ControlPadHardware* globalHardwareInstance = nullptr;
 
-// Static member definitions for USBControlPad
-bool USBControlPad::driver_instance_created = false;
+// ===== GLOBAL USB HOST AND DRIVER (USBHost_t36 standard pattern) =====
+// These must be global objects for USBHost_t36 automatic discovery
+USBHost globalUSBHost;
+
+// Callback functions to test if standard drivers see any devices
+void testKeyboardCallback(int unicode) {
+    Serial.println("🎹 *** KEYBOARD DETECTED BY STANDARD DRIVER! ***");
+}
+
+void testMouseCallback(int buttons) {
+    Serial.println("🖱️ *** MOUSE DETECTED BY STANDARD DRIVER! ***");
+}
+
+// Try a simpler approach first - let's test with standard drivers
+KeyboardController testKeyboard(globalUSBHost);
+MouseController testMouse(globalUSBHost);
+
+USBControlPad globalControlPadDriver(globalUSBHost);
+
+// Global driver pointer for easy access
+USBControlPad* controlPadDriver = &globalControlPadDriver;
 
 // ===== USB DRIVER IMPLEMENTATION =====
 
-USBControlPad::USBControlPad(USB_Device* dev) 
-    : USB_Driver_FactoryGlue<USBControlPad>(dev),
-      kbd_poll_cb([this](int r) { kbd_poll(r); }),
-      ctrl_poll_cb([this](int r) { ctrl_poll(r); }),
-      dual_poll_cb([this](int r) { dual_poll(r); }),
-      hall_sensor_poll_cb([this](int r) { hall_sensor_poll(r); }),
-      sensor_out_poll_cb([this](int r) { sensor_out_poll(r); }),
-      send_cb([this](int r) { sent(r); }) {
-    
-    // Initialize USB command serialization mutex for proper threading
-    usbCommandMutex = (ATOM_MUTEX*)malloc(sizeof(ATOM_MUTEX));
-    if (usbCommandMutex) {
-        if (atomMutexCreate(usbCommandMutex) == ATOM_OK) {
-            Serial.println("🔧 USB Command Mutex initialized");
-        } else {
-            free(usbCommandMutex);
-            usbCommandMutex = nullptr;
-            Serial.println("❌ Failed to create USB Command Mutex");
-        }
-    }
+USBControlPad::USBControlPad(USBHost &host) : USBDriver(), myusb(&host) {
+    // Initialize USB driver state - no init() method needed for USBHost_t36
     
     Serial.println("🔧 USBControlPad driver instance created");
 }
 
-bool USBControlPad::offer_interface(const usb_interface_descriptor* iface, size_t length) {
-    Serial.println("🔍 *** USBControlPad::offer_interface called ***");
-    Serial.printf("   Interface: %d\n", iface->bInterfaceNumber);
-    Serial.printf("   Class: 0x%02X\n", iface->bInterfaceClass);
-    Serial.printf("   SubClass: 0x%02X\n", iface->bInterfaceSubClass);
-    Serial.printf("   Protocol: 0x%02X\n", iface->bInterfaceProtocol);
+bool USBControlPad::claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len) {
+    Serial.println("🔍 *** USBControlPad::claim called ***");
+    Serial.printf("   Device: VID:0x%04X PID:0x%04X, Type:%d, DescLen:%d\n", 
+                 device->idVendor, device->idProduct, type, len);
     
-    // Accept ALL interfaces for ControlPad device (VID:0x2516 PID:0x012D)
-    Serial.printf("✅ USBControlPad ACCEPTING Interface %d for raw USB access!\n", iface->bInterfaceNumber);
+    // Check if this is our ControlPad device (VID:0x2516 PID:0x012D)
+    if (device->idVendor != CONTROLPAD_VID || device->idProduct != CONTROLPAD_PID) {
+        Serial.printf("❌ Not ControlPad device: VID:0x%04X PID:0x%04X (looking for VID:0x%04X PID:0x%04X)\n", 
+                     device->idVendor, device->idProduct, CONTROLPAD_VID, CONTROLPAD_PID);
+        return false;
+    }
+    
+    Serial.printf("🎯 *** CONTROLPAD DEVICE FOUND! *** VID:0x%04X PID:0x%04X\n", device->idVendor, device->idProduct);
+    
+    // Parse interface descriptors to find our endpoints
+    const uint8_t *p = descriptors;
+    const uint8_t *end = p + len;
+    
+    while (p < end) {
+        uint8_t desc_len = p[0];
+        uint8_t desc_type = p[1];
+        
+        if (desc_type == 4) { // Interface descriptor
+            uint8_t interfaceNumber = p[2];
+            uint8_t interfaceClass = p[5];
+            uint8_t interfaceSubClass = p[6];
+            uint8_t interfaceProtocol = p[7];
+            
+            Serial.printf("   Interface: %d, Class: 0x%02X, SubClass: 0x%02X, Protocol: 0x%02X\n", 
+                         interfaceNumber, interfaceClass, interfaceSubClass, interfaceProtocol);
+        }
+        
+        p += desc_len;
+    }
+    
+    // Claim all interfaces for ControlPad
+    Serial.println("✅ USBControlPad claiming device for raw USB access!");
+    
+    // Set up the device
+    device_ = device;
+    
+    // Store the instance globally so our main loop can access it
+    controlPadDriver = this;
+    
     return true;
 }
 
-USB_Driver* USBControlPad::attach_interface(const usb_interface_descriptor* iface, size_t length, USB_Device* dev) {
-    Serial.println("🎯 *** USBControlPad::attach_interface called ***");
-    Serial.printf("   Attaching to Interface: %d\n", iface->bInterfaceNumber);
-    
-    // Create driver instance only once - but don't start polling yet
-    if (!driver_instance_created) {
-        driver_instance_created = true;
-        
-        // Create the driver instance
-        USBControlPad* driver = new USBControlPad(dev);
-        driver->interface = iface->bInterfaceNumber;
-        
-        // Configure for raw USB operation on all interfaces
-        driver->setupQuadInterface();
-        
-        // Store the instance globally so our main loop can access it
-        controlPadDriver = driver;
-        
-        Serial.printf("✅ USBControlPad driver created (primary: Interface %d)!\n", iface->bInterfaceNumber);
-        return driver;
-    } else {
-        // Additional interfaces - just acknowledge
-        Serial.printf("✅ Interface %d acknowledged (using existing driver)!\n", iface->bInterfaceNumber);
-        return nullptr;
-    }
-}
-
-void USBControlPad::detach() {
-    Serial.println("❌ USBControlPad detached");
+void USBControlPad::disconnect() {
+    Serial.println("❌ USBControlPad disconnected");
     initialized = false;
     kbd_polling = false;
     ctrl_polling = false;
@@ -87,26 +90,25 @@ void USBControlPad::detach() {
     hall_sensor_polling = false;
     sensor_out_polling = false;
     
-    // Clean up USB command mutex
-    if (usbCommandMutex) {
-        atomMutexDelete(usbCommandMutex);
-        free(usbCommandMutex);
-        usbCommandMutex = nullptr;
-    }
-    
-    // Reset static variable so a new driver can be created on reconnect
-    driver_instance_created = false;
-    
     // Clear global pointer
     if (controlPadDriver == this) {
         controlPadDriver = nullptr;
     }
 }
 
-bool USBControlPad::begin(ATOM_QUEUE *q) {
+void USBControlPad::control(const Transfer_t *transfer) {
+    // Handle control transfer completion
+}
+
+// Note: USBHost_t36 automatically calls the callback function specified 
+// in queue_Data_Transfer() when transfer completes, so we don't need 
+// a separate data_complete method
+
+bool USBControlPad::begin(DMAQueue<controlpad_event, 16> *q) {
     queue = q;
     if (queue != nullptr) {
         Serial.println("🎯 USB DRIVER BEGIN - Starting polling...");
+        setupQuadInterface();
         startQuadPolling();
         initialized = true;
         Serial.println("✅ USB Driver initialization complete");
@@ -130,11 +132,19 @@ void USBControlPad::setupQuadInterface() {
 void USBControlPad::startQuadPolling() {
     Serial.println("🔄 Starting CONSERVATIVE endpoint polling...");
     
+    if (!device_) {
+        Serial.println("❌ No device available for polling");
+        return;
+    }
+    
     // Start with only the most essential endpoints first
     
     // Start polling Interface 1 Control (64 byte packets) - MOST IMPORTANT FOR BUTTONS
     Serial.printf("📡 Starting control polling on EP 0x%02X...\n", ctrl_ep_in);
-    if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) == 0) {
+    ctrl_pipe_in = new_Pipe(device_, 3, ctrl_ep_in, 1, 64); // 3 = interrupt, 1 = input
+    if (ctrl_pipe_in) {
+        // Note: USBHost_t36 will automatically call our callback when transfer completes
+        queue_Data_Transfer(ctrl_pipe_in, ctrl_report, 64, this);
         ctrl_polling = true;
         Serial.println("✅ Control polling started successfully");
     } else {
@@ -146,7 +156,10 @@ void USBControlPad::startQuadPolling() {
     
     // Start polling Interface 0 (Keyboard - 8 byte packets) - SECONDARY PRIORITY
     Serial.printf("📡 Starting keyboard polling on EP 0x%02X...\n", kbd_ep_in);
-    if (InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb) == 0) {
+    kbd_pipe = new_Pipe(device_, 3, kbd_ep_in, 1, 8); // 3 = interrupt, 1 = input
+    if (kbd_pipe) {
+        // Note: USBHost_t36 will automatically call our callback when transfer completes
+        queue_Data_Transfer(kbd_pipe, kbd_report, 8, this);
         kbd_polling = true;
         Serial.println("✅ Keyboard polling started successfully");
     } else {
@@ -171,45 +184,41 @@ void USBControlPad::startQuadPolling() {
     }
 }
 
-// Polling callback implementations
-void USBControlPad::kbd_poll(int result) {
+// New transfer callback implementations
+void USBControlPad::kbd_callback(const Transfer_t *transfer) {
     static int kbd_counter = 0;
     
-    if (result > 0 && queue) {
+    if (transfer->length > 0 && queue) {
         kbd_counter++;
         
         // Queue keyboard event
         if (kbd_report[2] != 0) {
             controlpad_event event;
-            event.data[0] = result;  // Length in data[0]
-            memcpy(&event.data[1], kbd_report, min(result, 63));  // USB data in data[1-63]
-            atomQueuePut(queue, 0, &event);
+            event.data[0] = transfer->length;  // Length in data[0]
+            memcpy(&event.data[1], kbd_report, min((int)transfer->length, 63));  // USB data in data[1-63]
+            queue->put(event);
         }
         
         // Restart keyboard polling
-        int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
-        if (restart != 0) {
-            kbd_polling = false;
+        if (kbd_pipe && kbd_polling) {
+            queue_Data_Transfer(kbd_pipe, kbd_report, 8, this);
         }
-    } else if (result < 0) {
-        kbd_polling = false;
-    } else if (result == 0) {
+    } else if (transfer->length == 0) {
         // Still restart polling to keep listening
-        int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
-        if (restart != 0) {
-            kbd_polling = false;
+        if (kbd_pipe && kbd_polling) {
+            queue_Data_Transfer(kbd_pipe, kbd_report, 8, this);
         }
     }
 }
 
-void USBControlPad::ctrl_poll(int result) {
+void USBControlPad::ctrl_in_callback(const Transfer_t *transfer) {
     static int ctrl_counter = 0;
     
-    if (result > 0 && queue) {
+    if (transfer->length > 0 && queue) {
         ctrl_counter++;
         
         // Check for button press pattern: 43 01 00 00 XX (pressed/released)
-        if (result >= 6 && ctrl_report[0] == 0x43 && ctrl_report[1] == 0x01 && 
+        if (transfer->length >= 6 && ctrl_report[0] == 0x43 && ctrl_report[1] == 0x01 && 
             ctrl_report[2] == 0x00 && ctrl_report[3] == 0x00) {
             
             // 🚀 ATOMIC LED UPDATE PROTECTION
@@ -239,11 +248,11 @@ void USBControlPad::ctrl_poll(int result) {
                 controlpad_event event;
                 
                 // Store length in data[0] and USB packet in data[1-63]
-                event.data[0] = result;  // Length stored in first byte
-                memcpy(&event.data[1], ctrl_report, min(result, 63));  // USB data in bytes 1-63
+                event.data[0] = transfer->length;  // Length stored in first byte
+                memcpy(&event.data[1], ctrl_report, min((int)transfer->length, 63));  // USB data in bytes 1-63
                 
                 // Queue the raw USB event for main thread processing
-                if (atomQueuePut(queue, 0, (uint8_t*)&event) != ATOM_OK) {
+                if (!queue->put(event)) {
                     // Queue full - this is rare but can happen under heavy load
                     Serial.println("❌ USB: Queue full, event dropped!");
                 } else {
@@ -257,7 +266,7 @@ void USBControlPad::ctrl_poll(int result) {
             }
         } 
         // Check for command echoes: 56 8x (LED), 52 xx, 42 xx, 43 xx, 41 xx, 51 xx
-        else if (result >= 2 && (
+        else if (transfer->length >= 2 && (
                 (ctrl_report[0] == 0x56 && (ctrl_report[1] == 0x81 || ctrl_report[1] == 0x83)) ||  // LED commands
                 (ctrl_report[0] == 0x52) ||  // Effect mode commands
                 (ctrl_report[0] == 0x42) ||  // Activation commands 
@@ -285,72 +294,75 @@ void USBControlPad::ctrl_poll(int result) {
     
     restart_polling:
     // Restart the control polling
-    if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) != 0) {
-        ctrl_polling = false;
+    if (ctrl_pipe_in && ctrl_polling) {
+        queue_Data_Transfer(ctrl_pipe_in, ctrl_report, 64, this);
     }
 }
 
-void USBControlPad::dual_poll(int result) {
-    if (result > 0 && queue) {
-        // Queue the dual event
-        controlpad_event event;
-        result = min(result, 8);
-        event.data[0] = result;  // Length in data[0]
-        memcpy(&event.data[1], dual_report, min(result, 63));  // USB data in data[1-63]
-        atomQueuePut(queue, 0, &event);
-    }
-    
-    // Restart dual polling
-    if (InterruptMessage(dual_ep_in, 8, dual_report, &dual_poll_cb) != 0) {
-        dual_polling = false;
-    }
-}
-
-void USBControlPad::hall_sensor_poll(int result) {
-    if (result > 0 && queue) {
-        // Queue the hall sensor event
-        controlpad_event event;
-        result = min(result, 32);
-        event.data[0] = result;  // Length in data[0]
-        memcpy(&event.data[1], hall_sensor_report, min(result, 63));  // USB data in data[1-63]
-        atomQueuePut(queue, 0, &event);
-    }
-    
-    // Restart hall sensor polling
-    if (InterruptMessage(hall_sensor_ep_in, 32, hall_sensor_report, &hall_sensor_poll_cb) != 0) {
-        hall_sensor_polling = false;
-    }
-}
-
-void USBControlPad::sensor_out_poll(int result) {
-    if (result > 0 && queue) {
-        // Queue the event
-        controlpad_event event;
-        result = min(result, 32);
-        event.data[0] = result;  // Length in data[0]
-        memcpy(&event.data[1], sensor_out_report, min(result, 63));  // USB data in data[1-63]
-        atomQueuePut(queue, 0, &event);
-    }
-    
-    // Restart endpoint 0x07 polling
-    if (InterruptMessage(btn_ep_out, 32, sensor_out_report, &sensor_out_poll_cb) != 0) {
-        sensor_out_polling = false;
-    }
-}
-
-void USBControlPad::sent(int result) {
+void USBControlPad::ctrl_out_callback(const Transfer_t *transfer) {
+    // Handle control output transfer completion
     static int commandCounter = 0;
     commandCounter++;
     
-    if (result >= 0) {
+    if (transfer->length >= 0) {
         // Only show every 10th success to reduce spam
         if (commandCounter <= 5 || commandCounter % 10 == 0) {
             // Serial.printf("📤 Command #%d sent successfully\n", commandCounter);
         }
     } else {
-        // Serial.printf("❌ Command #%d FAILED: %d\n", commandCounter, result);
+        // Serial.printf("❌ Command #%d FAILED: %d\n", commandCounter, transfer->length);
     }
 }
+
+void USBControlPad::dual_callback(const Transfer_t *transfer) {
+    if (transfer->length > 0 && queue) {
+        // Queue the dual event
+        controlpad_event event;
+        int len = min((int)transfer->length, 8);
+        event.data[0] = len;  // Length in data[0]
+        memcpy(&event.data[1], dual_report, min(len, 63));  // USB data in data[1-63]
+        queue->put(event);
+    }
+    
+    // Restart dual polling
+    if (dual_pipe && dual_polling) {
+        queue_Data_Transfer(dual_pipe, dual_report, 8, this);
+    }
+}
+
+void USBControlPad::hall_sensor_callback(const Transfer_t *transfer) {
+    if (transfer->length > 0 && queue) {
+        // Queue the hall sensor event
+        controlpad_event event;
+        int len = min((int)transfer->length, 32);
+        event.data[0] = len;  // Length in data[0]
+        memcpy(&event.data[1], hall_sensor_report, min(len, 63));  // USB data in data[1-63]
+        queue->put(event);
+    }
+    
+    // Restart hall sensor polling
+    if (hall_sensor_pipe && hall_sensor_polling) {
+        queue_Data_Transfer(hall_sensor_pipe, hall_sensor_report, 32, this);
+    }
+}
+
+void USBControlPad::sensor_out_callback(const Transfer_t *transfer) {
+    if (transfer->length > 0 && queue) {
+        // Queue the event
+        controlpad_event event;
+        int len = min((int)transfer->length, 32);
+        event.data[0] = len;  // Length in data[0]
+        memcpy(&event.data[1], sensor_out_report, min(len, 63));  // USB data in data[1-63]
+        queue->put(event);
+    }
+    
+    // Restart endpoint 0x07 polling
+    if (sensor_out_pipe && sensor_out_polling) {
+        queue_Data_Transfer(sensor_out_pipe, sensor_out_report, 32, this);
+    }
+}
+
+// The sent callback is now handled by ctrl_out_callback
 
 bool USBControlPad::sendUSBInterfaceReSponseActivation() {
     if (!initialized) {
@@ -444,30 +456,26 @@ bool USBControlPad::sendActivationCommandsForInterface(int step, const char* des
 // ===== LED CONTROL COMMANDS =====
 
 bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
-    if (!initialized || length > 64) {
+    if (!initialized || length > 64 || !ctrl_pipe_out) {
         return false;
     }
     
-    // SIMPLIFIED: Remove mutex to test if it's causing issues
-    // if (usbCommandMutex) {
-    //     if (atomMutexGet(usbCommandMutex, 100) != ATOM_OK) {  // 100ms timeout
-    //         Serial.println("❌ USB Command Mutex timeout in sendCommand()");
-    //         return false;  // Failed to acquire mutex in time
-    //     }
-    // }
-
+    // Create output pipe if not already created
+    if (!ctrl_pipe_out) {
+        ctrl_pipe_out = new_Pipe(device_, 3, ctrl_ep_out, 0, 64); // 3 = interrupt, 0 = output
+        if (!ctrl_pipe_out) {
+            Serial.println("❌ Failed to create control output pipe");
+            return false;
+        }
+    }
+    
     // Send via interrupt transfer to control endpoint
-    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
+    queue_Data_Transfer(ctrl_pipe_out, const_cast<uint8_t*>(data), length, this);
     
     // SIMPLIFIED: Minimal delay to test if timing is the issue
     delayMicroseconds(850);
     
-    // Release mutex after command completes
-    // if (usbCommandMutex) {
-    //     atomMutexPut(usbCommandMutex);
-    // }
-    
-    return (result == 0);
+    return true;
 }
 
 bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2) {
@@ -479,21 +487,7 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
     // The 50ms verification timeout was causing interference with button press/release cycles
     if (atomicLEDUpdateInProgress) {
         // During LED updates, use simplified command sending without verification delays
-        int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
-        
-        // CRITICAL: Device needs time to process LED commands - but use minimal delay
-        delayMicroseconds(850); // Back to working timing that doesn't black out
-        return (result == 0);
-    }
-    
-    // SINGLE SERIALIZATION POINT: Use AtomThreads mutex for proper USB command flow
-    // This prevents the 100ms-1s timing interference window discovered by user
-    if (usbCommandMutex) {
-        // Use timeout instead of forever wait to prevent hangs
-        if (atomMutexGet(usbCommandMutex, 50) != ATOM_OK) {  // 100ms timeout
-            Serial.println("❌ USB Command Mutex timeout in sendLEDCommandWithVerification()");
-            return false;  // Failed to acquire mutex in time
-        }
+        return sendCommand(data, length);
     }
     
     // SEQUENTIAL MODE: Always use verification for reliable command sequencing
@@ -503,11 +497,8 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
     expectedLEDEcho[1] = expectedEcho2;
     
     // Send the command
-    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb); 
-    if (result != 0) {
-        if (usbCommandMutex) {
-            atomMutexPut(usbCommandMutex);
-        }
+    bool result = sendCommand(data, length);
+    if (!result) {
         return false;
     }
     
@@ -521,11 +512,6 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
     if (!ledCommandVerified) {
         // Verification failure - USB echo timeout
         // Serial.printf("⚠️ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
-    }
-    
-    // Release USB command mutex
-    if (usbCommandMutex) {
-        atomMutexPut(usbCommandMutex);
     }
     
     // Always return success during LED updates to avoid blocking
@@ -786,96 +772,96 @@ ControlPadHardware::ControlPadHardware() {
 }
 
 ControlPadHardware::~ControlPadHardware() {
-    if (controlpad_queue_data) {
-        free(controlpad_queue_data);
-    }
-    if (led_command_queue_data) {
-        free(led_command_queue_data);
-    }
+    // DMA queues clean up automatically
+    // usbDriver is now a member object, not a pointer - no need to delete
 }
 
 bool ControlPadHardware::begin(ControlPad& pad) {
+    Serial.println("🚀 ControlPadHardware::begin() called!");
+    
     // Store reference to the ControlPad instance
     currentPad = &pad;
     
-    // 1. Initialize queue
-    controlpad_queue_data = (controlpad_event*)malloc(10 * sizeof(controlpad_event));
-    if (!controlpad_queue_data) {
-        Serial.println("❌ Failed to allocate queue data");
+    // 1. Initialize DMA queues
+    if (!controlpad_queue.begin()) {
+        Serial.println("❌ Failed to initialize controlpad queue");
         return false;
     }
     
-    controlpad_queue = (ATOM_QUEUE*)malloc(sizeof(ATOM_QUEUE));
-    if (!controlpad_queue) {
-        Serial.println("❌ Failed to allocate queue");
-        free(controlpad_queue_data);
+    if (!led_command_queue.begin()) {
+        Serial.println("❌ Failed to initialize LED command queue");
         return false;
     }
+    Serial.println("✅ DMA queues initialized");
     
-    atomQueueCreate(controlpad_queue, (uint8_t*)controlpad_queue_data, 10, sizeof(controlpad_event));
-
-    // 2. Initialize LED command queue for MIDI-timing-friendly updates
-    led_command_queue_data = (led_command_event*)malloc(16 * sizeof(led_command_event));
-    if (!led_command_queue_data) {
-        Serial.println("❌ Failed to allocate LED queue data");
-        return false;
-    }
+    // 2. Use global USB Host and Driver (USBHost_t36 standard pattern)
+    Serial.println("✅ Using global USB driver and host objects");
     
-    led_command_queue = (ATOM_QUEUE*)malloc(sizeof(ATOM_QUEUE));
-    if (!led_command_queue) {
-        Serial.println("❌ Failed to allocate LED queue");
-        free(led_command_queue_data);
-        return false;
-    }
+    // 3. Start global USB host
+    globalUSBHost.begin();
+    Serial.println("🔌 Global USB Host started, looking for devices...");
     
-    atomQueueCreate(led_command_queue, (uint8_t*)led_command_queue_data, 16, sizeof(led_command_event));
-    Serial.println("✅ LED command queue created (16 commands, MIDI-timing-friendly)");
+    // Set up test callbacks to see if standard drivers detect anything  
+    testKeyboard.attachPress(testKeyboardCallback);
+    // testMouse.attachPress(testMouseCallback);  // Mouse has different API
+    Serial.println("🔧 Test callbacks attached to standard drivers");
     
-    // 3. Start USB host
-    usbHost.begin();
-    Serial.println("🔌 USB Host started, waiting for device enumeration...");
+    // 🔥 CRITICAL: Allow USB host to discover and enumerate devices
+    // The USB Host needs time to detect devices and call driver claim() methods
+    Serial.println("🔍 Starting device enumeration (calling USB Task)...");
+    Serial.println("💡 Make sure ControlPad device is plugged into USB Host port!");
+    Serial.println("💡 Looking for device VID:0x2516 PID:0x012D...");
     
-    // 4. Wait for device enumeration and driver creation (longer delay)
-    unsigned long startTime = millis();
-    while (!controlPadDriver && (millis() - startTime) < 10000) {  // 10 second timeout
+    for (int i = 0; i < 100; i++) {  // Allow up to 10 seconds for enumeration
+        globalUSBHost.Task();  // This processes USB enumeration and calls claim()
+        
+        // Show progress every 10 iterations (1 second)
+        if (i % 10 == 0) {
+            Serial.printf("🔄 Enumeration attempt %d/100...\n", i + 1);
+            Serial.println("   Testing if ANY USB devices are being detected...");
+        }
+        
         delay(100);
-        if (controlPadDriver) {
-            Serial.println("✅ Driver instance detected!");
+        if (globalControlPadDriver.device_) {
+            Serial.printf("✅ Device enumerated after %d iterations!\n", i + 1);
             break;
         }
     }
     
-    if (!controlPadDriver) {
-        Serial.println("❌ No ControlPad driver found after 10 seconds");
+    // 4. Wait for device enumeration (ControlPad device connection)
+    unsigned long startTime = millis();
+    while (!globalControlPadDriver.device_ && (millis() - startTime) < 10000) {  // 10 second timeout
+        delay(100);
+    }
+    
+    if (!globalControlPadDriver.device_) {
+        Serial.println("❌ No ControlPad device found after 10 seconds");
         return false;
     }
+    
+    Serial.println("✅ ControlPad device connected!");
     
     // 5. Wait additional time for USB configuration to stabilize
     Serial.println("⏳ Waiting for USB configuration to stabilize...");
     delay(2000);
     
     // 6. Now initialize the driver (this starts polling)
-    if (controlPadDriver) {
-        Serial.println("🎯 Starting driver initialization...");
-        bool initResult = controlPadDriver->begin(controlpad_queue);
-        if (!initResult) {
-            Serial.println("❌ Driver initialization failed");
-            return false;
-        }
-        
-        Serial.printf("✅ Driver initialized! initialized=%s\n", 
-                     controlPadDriver->initialized ? "true" : "false");
-        
-        // 7. Wait for polling to stabilize
-        delay(1000);
-        
-        // 8. Send activation sequence
-        Serial.println("🚀 Sending activation sequence...");
-        controlPadDriver->sendUSBInterfaceReSponseActivation();
-    } else {
-        Serial.println("❌ controlPadDriver is null - USB device not found");
+    Serial.println("🎯 Starting driver initialization...");
+    bool initResult = globalControlPadDriver.begin(&controlpad_queue);
+    if (!initResult) {
+        Serial.println("❌ Driver initialization failed");
         return false;
     }
+    
+    Serial.printf("✅ Driver initialized! initialized=%s\n", 
+                 globalControlPadDriver.initialized ? "true" : "false");
+    
+    // 7. Wait for polling to stabilize
+    delay(1000);
+    
+    // 8. Send activation sequence
+    Serial.println("🚀 Sending activation sequence...");
+    globalControlPadDriver.sendUSBInterfaceReSponseActivation();
     
     // 9. ControlPad setup is handled by the caller (main.cpp)
     // No need to call pad.begin() here as it would create circular recursion
@@ -884,19 +870,12 @@ bool ControlPadHardware::begin(ControlPad& pad) {
 }
 
 void ControlPadHardware::poll() {
-    // CRITICAL: Process events from AtomQueue in main thread context with USB-synchronized timing
+    // CRITICAL: Process events from DMAQueue in main thread context with USB-synchronized timing
     // This prevents USB timing conflicts by processing button events at consistent intervals
     
     static int debugCounter = 0;
     static unsigned long lastProcessTime = 0;
     debugCounter++;
-    
-    if (!controlpad_queue) {
-        if (debugCounter % 1000 == 0) {
-            Serial.printf("🚫 ControlPadHardware::poll() - Missing controlpad_queue\n");
-        }
-        return;
-    }
     
     if (!currentPad) {
         if (debugCounter % 1000 == 0) {
@@ -922,9 +901,8 @@ void ControlPadHardware::poll() {
     //     controlPadDriver->processLEDCommandQueue();
     // }
     
-    // Try a SINGLE non-blocking queue get with different timeout approaches
-    int queueResult = atomQueueGet(controlpad_queue, -1, (uint8_t*)&rawEvent);
-    if (queueResult == ATOM_OK) {
+    // Try a SINGLE non-blocking queue get
+    if (controlpad_queue.get(rawEvent, 0)) { // 0 = non-blocking
         eventsProcessed++;
         
         uint8_t packetLen = rawEvent.data[0];  // Length is stored in data[0]
@@ -981,14 +959,13 @@ void ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count)
     // TEMPORARY: Disable queue system - revert to PROVEN working synchronous approach
     // The queue system was processing commands too rapidly without proper timing/USB controls
     
-    if (controlPadDriver) {
-        //Serial.println("🔄 Using synchronous LED update (queue disabled for debugging)");
-        bool success = controlPadDriver->updateAllLEDs(colors, count);
-        if (!success) {
-           // Serial.println("❌ Synchronous LED update failed");
-        } else {
-           // Serial.println("✅ Synchronous LED update completed");
-        }
+    // Using global driver object (USBHost_t36 pattern)
+    //Serial.println("🔄 Using synchronous LED update (queue disabled for debugging)");
+    bool success = globalControlPadDriver.updateAllLEDs(colors, count);
+    if (!success) {
+       // Serial.println("❌ Synchronous LED update failed");
+    } else {
+       // Serial.println("✅ Synchronous LED update completed");
     }
 }
 
@@ -1002,7 +979,7 @@ void ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count)
 // Uses proven TeensyAtomThreads queue system with DMA underneath
 
 bool USBControlPad::queueLEDUpdate(const ControlPadColor* colors, size_t count) {
-    if (!initialized || count > 24 || !globalHardwareInstance || !globalHardwareInstance->led_command_queue) {
+    if (!initialized || count > 24 || !globalHardwareInstance) {
         return false;
     }
     
@@ -1010,10 +987,9 @@ bool USBControlPad::queueLEDUpdate(const ControlPadColor* colors, size_t count) 
     led_command_event commands[4];
     globalHardwareInstance->prepareLEDCommands(colors, commands);
     
-    // Queue all 4 commands using TeensyAtomThreads queue system
+    // Queue all 4 commands using DMA queue system
     for (int i = 0; i < 4; i++) {
-        int result = atomQueuePut(globalHardwareInstance->led_command_queue, 100, (uint8_t*)&commands[i]);
-        if (result != ATOM_OK) {
+        if (!globalHardwareInstance->led_command_queue.put(commands[i], 100)) {
             Serial.printf("❌ Failed to queue LED command %d\n", i);
             return false;
         }
@@ -1024,15 +1000,14 @@ bool USBControlPad::queueLEDUpdate(const ControlPadColor* colors, size_t count) 
 }
 
 void USBControlPad::processLEDCommandQueue() {
-    if (!globalHardwareInstance || !globalHardwareInstance->led_command_queue) {
+    if (!globalHardwareInstance) {
         return;
     }
     
     // Process one LED command per loop iteration to spread CPU load
     led_command_event cmd;
-    int result = atomQueueGet(globalHardwareInstance->led_command_queue, -1, (uint8_t*)&cmd);
     
-    if (result == ATOM_OK) {
+    if (globalHardwareInstance->led_command_queue.get(cmd, 0)) { // 0 = non-blocking
         // Send the queued command
         const char* cmdNames[] = {"Package1", "Package2", "Apply", "Finalize"};
         if (cmd.command_type < 4) {
