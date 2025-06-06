@@ -67,6 +67,12 @@ public:
     void setAllLedsOff();
     void setAllLedsColor(uint8_t r, uint8_t g, uint8_t b);
     void setRainbowPattern();
+    
+    // Animation control
+    void enableAnimation();
+    void disableAnimation();
+    void updateAnimation();
+    bool isAnimationEnabled() const;
 
     // Event API
     bool pollEvent(ControlPadEvent& event); // Polling
