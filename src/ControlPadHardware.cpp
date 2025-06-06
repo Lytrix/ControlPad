@@ -370,6 +370,20 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
                 }
                 
                 if (validEvent) {
+                    // *** ALWAYS UPDATE BUTTON STATE FIRST (regardless of animation) ***
+                    extern ControlPadHardware* globalHardwareInstance;
+                    if (globalHardwareInstance && globalHardwareInstance->currentPad) {
+                        ControlPadEvent event;
+                        event.type = ControlPadEventType::Button;
+                        event.button.button = ledIndex;
+                        event.button.pressed = pressed;
+                        
+                        // This calls pushEvent which updates buttonState[ledIndex] = pressed
+                        globalHardwareInstance->currentPad->pushEvent(event);
+                        Serial.printf("📨 Button state updated: Button %d = %s\n", 
+                                     ledIndex + 1, pressed ? "PRESSED" : "RELEASED");
+                    }
+                    
                     // *** DIRECT LED HIGHLIGHTING - IMMEDIATE VISUAL FEEDBACK ***
                     Serial.printf("🎮 Button %d %s (Direct USB callback)\n", 
                                  ledIndex + 1, 
@@ -379,54 +393,50 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
                     Serial.printf("🔍 USB_ID=%d → Direct=%d, ColumnMajor=%d → LED_index=%d (Button %d)\n", 
                                  buttonId, directMapping, columnMajorMapping, ledIndex, ledIndex + 1);
                     
-                    // *** USE CORRECT RAINBOW COLORS FROM MAIN.CPP ***
-                    // These MUST match the exact colors set in main.cpp for proper highlighting
-                    ControlPadColor correctRainbowColors[24] = {
-                        {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
-                        {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
-                        {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
-                        {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
-                        {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
-                    };
+                    // *** CHECK IF ANIMATION IS ACTIVE - IF SO, SKIP DIRECT LED UPDATES ***
+                    bool animationActive = (globalHardwareInstance && globalHardwareInstance->isAnimationEnabled());
                     
-                    // Create LED color array for the update
-                    ControlPadColor ledColors[24];
-                    
-                    // Copy the correct rainbow base colors
-                    for (int i = 0; i < 24; i++) {
-                        ledColors[i] = correctRainbowColors[i];
-                    }
-                    
-                    // Apply highlight: White when pressed, original color when released
-                    if (pressed) {
-                        ledColors[ledIndex] = {255, 255, 255}; // Bright white highlight
-                        Serial.printf("💡 Highlighting button %d in WHITE (LED index %d changed to R=255 G=255 B=255)\n", 
-                                     ledIndex + 1, ledIndex);
-                        Serial.printf("🔍 LED[%d] BEFORE packaging: R=%d G=%d B=%d\n", 
-                                     ledIndex, ledColors[ledIndex].r, ledColors[ledIndex].g, ledColors[ledIndex].b);
+                    if (animationActive) {
+                        // Animation is active - it will handle both animation AND button states
+                        // Button state already updated above, LED updates handled by animation
+                        Serial.printf("🎭 Animation active - button state updated, LED update handled by animation\n");
                     } else {
-                        // Return to original rainbow color (already set above)
-                        Serial.printf("🎨 Returning button %d to original rainbow color RGB(%d,%d,%d) (LED index %d)\n", 
-                                     ledIndex + 1,
-                                     correctRainbowColors[ledIndex].r,
-                                     correctRainbowColors[ledIndex].g,
-                                     correctRainbowColors[ledIndex].b,
-                                     ledIndex);
-                    }
-                    
-                    // *** BACK TO DIRECT LED UPDATE WITH PRIORITY QUEUING ***
-                    // The API method doesn't work because it doesn't detect "changes" when setting same colors
-                    Serial.printf("🎯 Sending direct LED update with %s\n", pressed ? "WHITE highlight" : "original colors");
-                    
-                    // *** DEBUG: Print the specific button color being set ***
-                    Serial.printf("🔍 Button %d color: R=%d G=%d B=%d\n", ledIndex,
-                                 ledColors[ledIndex].r, ledColors[ledIndex].g, ledColors[ledIndex].b);
-                    
-                    bool success = updateAllLEDs(ledColors, 24, true); // true = HIGH PRIORITY
-                    if (success) {
-                        Serial.printf("✅ LED commands queued with HIGH PRIORITY (queue size: %zu)\n", ledQueue.size());
-                    } else {
-                        Serial.printf("⚠️ HIGH PRIORITY LED command queuing failed\n");
+                        // Animation not active - use direct LED updates as before
+                        Serial.printf("🎯 Sending direct LED update with %s\n", pressed ? "WHITE highlight" : "original colors");
+                        
+                        // *** USE CORRECT RAINBOW COLORS FROM MAIN.CPP ***
+                        ControlPadColor correctRainbowColors[24] = {
+                            {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
+                            {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
+                            {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
+                            {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
+                            {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
+                        };
+                        
+                        // Create LED color array for the update
+                        ControlPadColor ledColors[24];
+                        
+                        // Copy the correct rainbow base colors
+                        for (int i = 0; i < 24; i++) {
+                            ledColors[i] = correctRainbowColors[i];
+                        }
+                        
+                        // Apply highlight: White when pressed, original color when released
+                        if (pressed) {
+                            ledColors[ledIndex] = {255, 255, 255}; // Bright white highlight
+                            Serial.printf("💡 Highlighting button %d in WHITE (LED index %d)\n", 
+                                         ledIndex + 1, ledIndex);
+                        } else {
+                            // Return to original rainbow color (already set above)
+                            Serial.printf("🎨 Returning button %d to original rainbow color\n", ledIndex + 1);
+                        }
+                        
+                        bool success = updateAllLEDs(ledColors, 24, true); // true = HIGH PRIORITY
+                        if (success) {
+                            Serial.printf("✅ LED commands queued with HIGH PRIORITY (queue size: %zu)\n", ledQueue.size());
+                        } else {
+                            Serial.printf("⚠️ HIGH PRIORITY LED command queuing failed\n");
+                        }
                     }
                 }
             }
@@ -811,7 +821,7 @@ bool ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count)
 // *** ANIMATION SYSTEM: Cycles through buttons with white highlighting ***
 class ButtonAnimation {
 private:
-    static const uint32_t ANIMATION_DELAY_MS = 150; // 150ms per button
+    static const uint32_t ANIMATION_DELAY_MS = 200; // 200ms per button to reduce conflicts
     uint32_t lastUpdateTime = 0;
     uint8_t currentButton = 0;
     bool animationEnabled = false; // Start disabled
@@ -831,22 +841,33 @@ public:
         
         uint32_t currentTime = millis();
         if (currentTime - lastUpdateTime >= ANIMATION_DELAY_MS) {
-            // Create LED array with base colors
+            // Get the current ControlPad instance to check button states
+            extern ControlPadHardware* globalHardwareInstance;
+            ControlPad* currentPad = globalHardwareInstance ? globalHardwareInstance->currentPad : nullptr;
+            
+            // Create LED array with rainbow base colors + current button states
             ControlPadColor ledColors[24];
             for (int i = 0; i < 24; i++) {
-                ledColors[i] = baseColors[i];
+                // Check if this button is currently pressed
+                bool isPressed = (currentPad && currentPad->getButtonState(i));
+                
+                if (isPressed) {
+                    // Use white for pressed buttons
+                    ledColors[i] = {255, 255, 255};
+                } else {
+                    // Use rainbow for unpressed buttons
+                    ledColors[i] = baseColors[i];
+                }
             }
             
-            // Highlight current button in white
+            // Apply animation highlight (white) - this will show on unpressed buttons
+            // For pressed buttons, they're already white so animation highlight is invisible
             ledColors[currentButton] = {255, 255, 255};
             
-            Serial.printf("🎭 Animation: Highlighting Button %d (LED index %d) in WHITE\n", 
-                         currentButton + 1, currentButton);
-            
-            // Send to hardware with NORMAL priority (button presses use HIGH priority)
+            // Send to hardware - when animation is active, it's the ONLY LED updater
             bool success = globalControlPadDriver.updateAllLEDs(ledColors, 24, false);
             if (success) {
-                Serial.printf("✅ Animation frame queued (queue size: %zu)\n", ledQueue.size());
+                Serial.printf("🎭 Animation: Button %d highlighted\n", currentButton + 1);
             } else {
                 Serial.println("⚠️ Animation frame failed to queue");
             }
