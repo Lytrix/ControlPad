@@ -71,7 +71,7 @@ void loop() {
     unsigned long currentTime = millis();
     
     // Change highlight every 500ms (adjust this timing as needed)
-    if (currentTime - lastHighlightTime >= 500) {
+    if (currentTime - lastHighlightTime >= 100) {
         lastHighlightTime = currentTime;
         
         if (!highlightState) {

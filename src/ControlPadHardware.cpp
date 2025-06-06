@@ -460,7 +460,7 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
     int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
     
     // SIMPLIFIED: Minimal delay to test if timing is the issue
-    //delayMicroseconds(1);
+    delayMicroseconds(850);
     
     // Release mutex after command completes
     // if (usbCommandMutex) {
@@ -511,27 +511,16 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
         return false;
     }
     
-    // FAST VERIFICATION: Reduced timeout to minimize interference window
-    // unsigned long startTime = millis();
-    // while (!ledCommandVerified && (millis() - startTime) < 10) {  // Reduced from 50ms to 10ms
-    //     delayMicroseconds(10); // Shorter delay
-    //     yield(); // Allow other processing
-    // }
-    
-    // SIMPLIFIED: No complex recovery - just clear verification state occasionally
-    static uint16_t commandCounter = 0;
-    commandCounter++;
-    
-    if (commandCounter % 50 == 0) {
-        // Simple periodic cleanup
-        ledCommandVerified = false;
-        expectedLEDEcho[0] = 0x00;
-        expectedLEDEcho[1] = 0x00;
+    // SIMPLE VERIFICATION: Just wait for echo without complex cleanup logic
+    unsigned long startTime = millis();
+    while (!ledCommandVerified && (millis() - startTime) < 10) {
+        delayMicroseconds(100);
+        yield(); // Allow USB processing
     }
     
     if (!ledCommandVerified) {
-        // Don't treat verification failure as critical error during fast updates
-        // Serial.printf("❌ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
+        // Verification failure - USB echo timeout
+        // Serial.printf("⚠️ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
     }
     
     // Release USB command mutex
@@ -608,97 +597,6 @@ bool USBControlPad::setStaticMode() {
     return sendCommand(cmd, 64);
 }
 
-bool USBControlPad::sendLEDPackages(const ControlPadColor* colors) {
-    // CRITICAL: Create local copy to prevent modification during USB transmission
-    static ControlPadColor colorBuffer[24];
-    memcpy(colorBuffer, colors, 24 * sizeof(ControlPadColor));
-    
-    // COMBINED LED PACKAGE SENDING - Package1 and Package2 back-to-back
-    // This eliminates the gap between packages that causes flicker
-    // ===== PACKAGE 1 =====
-    uint8_t cmd1[64] = {
-        0x56, 0x83, 0x00, 0x00,    // Header
-        0x01, 0x00, 0x00, 0x00,    // Package 1 marker
-        0x80, 0x01, 0x00, 0x00,    // Control flags
-        0xff, 0x00, 0x00, 0x00,    // Color flags
-        0x00, 0x00,                // Reserved
-        0xff, 0xff,                // Brightness for all LEDs
-        0x00, 0x00, 0x00, 0x00     // Reserved
-    };
-    
-    // LED data starts at position 24 - direct assignments
-    size_t pos = 24;
-    
-    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20) - unrolled
-    cmd1[pos++] = colorBuffer[0].r;   cmd1[pos++] = colorBuffer[0].g;   cmd1[pos++] = colorBuffer[0].b;   // Button 1
-    cmd1[pos++] = colorBuffer[5].r;   cmd1[pos++] = colorBuffer[5].g;   cmd1[pos++] = colorBuffer[5].b;   // Button 6
-    cmd1[pos++] = colorBuffer[10].r;  cmd1[pos++] = colorBuffer[10].g;  cmd1[pos++] = colorBuffer[10].b;  // Button 11
-    cmd1[pos++] = colorBuffer[15].r;  cmd1[pos++] = colorBuffer[15].g;  cmd1[pos++] = colorBuffer[15].b;  // Button 16
-    cmd1[pos++] = colorBuffer[20].r;  cmd1[pos++] = colorBuffer[20].g;  cmd1[pos++] = colorBuffer[20].b;  // Button 21
-    
-    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21) - unrolled
-    cmd1[pos++] = colorBuffer[1].r;   cmd1[pos++] = colorBuffer[1].g;   cmd1[pos++] = colorBuffer[1].b;   // Button 2
-    cmd1[pos++] = colorBuffer[6].r;   cmd1[pos++] = colorBuffer[6].g;   cmd1[pos++] = colorBuffer[6].b;   // Button 7
-    cmd1[pos++] = colorBuffer[11].r;  cmd1[pos++] = colorBuffer[11].g;  cmd1[pos++] = colorBuffer[11].b;  // Button 12
-    cmd1[pos++] = colorBuffer[16].r;  cmd1[pos++] = colorBuffer[16].g;  cmd1[pos++] = colorBuffer[16].b;  // Button 17
-    cmd1[pos++] = colorBuffer[21].r;  cmd1[pos++] = colorBuffer[21].g;  cmd1[pos++] = colorBuffer[21].b;  // Button 22
-    
-    // Column 3: buttons 3,8,13 (indices 2,7,12) - unrolled  
-    cmd1[pos++] = colorBuffer[2].r;   cmd1[pos++] = colorBuffer[2].g;   cmd1[pos++] = colorBuffer[2].b;   // Button 3
-    cmd1[pos++] = colorBuffer[7].r;   cmd1[pos++] = colorBuffer[7].g;   cmd1[pos++] = colorBuffer[7].b;   // Button 8
-    cmd1[pos++] = colorBuffer[12].r;  cmd1[pos++] = colorBuffer[12].g;  cmd1[pos++] = colorBuffer[12].b;  // Button 13
-    
-    // Button 18 (index 17) - only R component fits in package 1 (WORKING CONFIGURATION)
-    cmd1[pos++] = colorBuffer[17].r;  // Button 18 R (keep in Package 1)
-    
-    // Send Package1 WITH verification - wait for hardware acknowledgement
-    bool success1 = sendLEDCommandWithVerification(cmd1, 64, 0x56, 0x83);
-
-    // CRITICAL: Package 1→Package 2 gap timing (1200µs works for highlighting)
-    delayMicroseconds(850); // Sweet spot for Package 2 highlighting to work
-
-    // ===== PACKAGE 2 - EXACT WORKING STRUCTURE =====
-    uint8_t cmd2[64] = {
-        0x56, 0x83, 0x01          // Header for package 2
-    };
-    
-    pos = 3;
-    
-    // Complete button 18 (index 17) - GB components (R was in Package 1)
-    cmd2[pos++] = 0x00;  // Padding (R already sent in Package 1)
-    cmd2[pos++] = colorBuffer[17].g;  // Button 18 G
-    cmd2[pos++] = colorBuffer[17].b;  // Button 18 B
-    
-    // Button 23 (index 22)
-    cmd2[pos++] = colorBuffer[22].r;
-    cmd2[pos++] = colorBuffer[22].g;
-    cmd2[pos++] = colorBuffer[22].b;
-    
-    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23) - EXACT WORKING ORDER
-    cmd2[pos++] = colorBuffer[3].r;   cmd2[pos++] = colorBuffer[3].g;   cmd2[pos++] = colorBuffer[3].b;   // Button 4
-    cmd2[pos++] = colorBuffer[8].r;   cmd2[pos++] = colorBuffer[8].g;   cmd2[pos++] = colorBuffer[8].b;   // Button 9
-    cmd2[pos++] = colorBuffer[13].r;  cmd2[pos++] = colorBuffer[13].g;  cmd2[pos++] = colorBuffer[13].b;  // Button 14
-    cmd2[pos++] = colorBuffer[18].r;  cmd2[pos++] = colorBuffer[18].g;  cmd2[pos++] = colorBuffer[18].b;  // Button 19
-    cmd2[pos++] = colorBuffer[23].r;  cmd2[pos++] = colorBuffer[23].g;  cmd2[pos++] = colorBuffer[23].b;  // Button 24
-    
-    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19) - EXACT WORKING ORDER
-    cmd2[pos++] = colorBuffer[4].r;   cmd2[pos++] = colorBuffer[4].g;   cmd2[pos++] = colorBuffer[4].b;   // Button 5
-    cmd2[pos++] = colorBuffer[9].r;   cmd2[pos++] = colorBuffer[9].g;   cmd2[pos++] = colorBuffer[9].b;   // Button 10
-    cmd2[pos++] = colorBuffer[14].r;  cmd2[pos++] = colorBuffer[14].g;  cmd2[pos++] = colorBuffer[14].b;  // Button 15
-    cmd2[pos++] = colorBuffer[19].r;  cmd2[pos++] = colorBuffer[19].g;  cmd2[pos++] = colorBuffer[19].b;  // Button 20
-    
-    cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;
-     cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;
-      cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;
-       cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;
-        cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;
-         cmd2[pos++] = 0x00;  cmd2[pos++] = 0x00; cmd2[pos++] = 0x00;  
-        // Send Package2 WITH verification - wait for hardware acknowledgement  
-    bool success2 = sendLEDCommandWithVerification(cmd2, 64, 0x56, 0x83);
-
-    return (success1 && success2);
-}
-
 bool USBControlPad::sendApplyCommand() {
     uint8_t cmd[64] = {
         0x41, 0x80, 0x00, 0x00,
@@ -719,8 +617,7 @@ bool USBControlPad::sendApplyCommand() {
     };
     
     // Send Apply command WITH verification - wait for hardware acknowledgement
-    return sendLEDCommandWithVerification(cmd, 64, 0x41, 0x80);
-    delayMicroseconds(850); 
+    return sendCommand(cmd, 64);
 }
 
 bool USBControlPad::sendFinalizeCommand() {
@@ -743,7 +640,7 @@ bool USBControlPad::sendFinalizeCommand() {
     };
     
     // Send Finalize command WITH verification - wait for hardware acknowledgement
-    bool success = sendLEDCommandWithVerification(cmd, 64, 0x51, 0x28);
+    bool success = sendCommand(cmd, 64);
     return success;
 }
 
@@ -753,6 +650,11 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
         return false;
     }
     
+    // CRITICAL: Create atomic snapshot to prevent modification during Package1→Package2 
+    // This prevents the 4-cycle pattern caused by colors changing between packages
+    static ControlPadColor atomicColorBuffer[24];
+    memcpy(atomicColorBuffer, colors, 24 * sizeof(ControlPadColor));
+    
     // 🚀 OPTIMIZED ATOMIC LED UPDATE - Minimal Commands Only
     // Remove setCustomMode() from every button press - only needed at startup!
     // This eliminates the LED controller reset that causes black flashes
@@ -760,9 +662,22 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     // SIMPLE LED UPDATE - Remove all unnecessary complexity
     pauseUSBPolling();
     bool success = true;
-    // Essential commands only - no extra delays
-    success &= sendLEDPackages(colors);
-    delayMicroseconds(850);
+    // TEENSY 4.x DMA FLUSH: Prevent TeensyUSBHost2 buffer accumulation 
+    // static uint16_t updateCounter = 0;
+    // updateCounter++;
+    
+    // Essential commands only - use ATOMIC BUFFER for both packages
+    success &= sendLEDPackage1(atomicColorBuffer);
+    //delayMicroseconds(650); // CRITICAL: Package 1→Package 2 gap - prevent overwrite
+    success &= sendLEDPackage2(atomicColorBuffer);
+    
+    // TEENSY4 i.MX RT SPECIFIC: USB state reset every 50 updates to prevent accumulation
+    // if (updateCounter % 24 == 0) {
+    //     // Alternative approach: Force USB polling restart to clear TeensyUSBHost2 state
+    //     pauseUSBPolling();
+    //     delay(5); // Longer USB quiet period to clear i.MX RT USB controller state
+    //     resumeUSBPolling();
+    // }
     success &= sendApplyCommand();
     success &= sendFinalizeCommand();
     
@@ -853,7 +768,11 @@ bool USBControlPad::sendLEDPackage2(const ControlPadColor* colors) {
     cmd[pos++] = colors[14].r;  cmd[pos++] = colors[14].g;  cmd[pos++] = colors[14].b;  // Button 15
     cmd[pos++] = colors[19].r;  cmd[pos++] = colors[19].g;  cmd[pos++] = colors[19].b;  // Button 20
     
-    // Rest filled with zeros (already initialized)
+    // CRITICAL: Pad to exactly 64 bytes with 0x00 (28 bytes needed) - pos=36, need 28 more
+    cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00;
+    cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00;
+    cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00;
+    cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; cmd[pos++] = 0x00; // 28 bytes total
     
     // Serial.println("🎨 Sending LED Package 2");
     return sendCommand(cmd, 64);
