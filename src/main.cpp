@@ -70,8 +70,8 @@ void loop() {
     
     unsigned long currentTime = millis();
     
-    // Change highlight every 500ms (adjust this timing as needed)
-    if (currentTime - lastHighlightTime >= 100) {
+    // Change highlight every 200ms (optimized for new package structure)
+    if (currentTime - lastHighlightTime >= 200) {
         lastHighlightTime = currentTime;
         
         if (!highlightState) {
