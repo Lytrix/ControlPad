@@ -16,8 +16,13 @@
 
 // ===== CONTROLPAD PROTOCOL STRUCTURES =====
 struct controlpad_event {
-  uint8_t data[64];
-  uint8_t len;
+  uint8_t data[64];  // data[0] = length, data[1-63] = actual USB data
+};
+
+// LED Command Queue for MIDI-timing-friendly updates
+struct led_command_event {
+    uint8_t command_type;  // 0=Package1, 1=Package2, 2=Apply, 3=Finalize
+    uint8_t data[64];      // USB command data
 };
 
 struct ControlPadPacket {
@@ -30,6 +35,17 @@ struct ControlPadPacket {
 // Forward declarations
 class ControlPad;
 class ControlPadHardware;
+
+// ===== DMA LED UPDATE SYSTEM FOR MIDI TIMING =====
+// Asynchronous LED updates that don't block CPU for MIDI processing
+struct DMALEDUpdate {
+    uint8_t package1[64];     // LED Package 1 command
+    uint8_t package2[64];     // LED Package 2 command  
+    uint8_t apply[64];        // Apply command
+    uint8_t finalize[64];     // Finalize command
+    volatile bool inProgress; // DMA transfer status
+    volatile int currentCommand; // Which command (0-3) is being sent
+};
 
 // ===== USB DRIVER CLASS =====
 // This is the actual USB driver that inherits from USB_Driver_FactoryGlue
@@ -90,6 +106,9 @@ private:
     
     // USB Command Serialization using AtomThreads primitives
     ATOM_MUTEX* usbCommandMutex = nullptr;  // Single serialization point for all USB commands
+    
+    // Atomic LED Update Control - Prevents USB interference during LED updates
+    volatile bool atomicLEDUpdateInProgress = false;
 
     // Callback implementations
     void kbd_poll(int result);
@@ -131,6 +150,21 @@ public:
     bool sendFinalizeCommand();
     bool updateAllLEDs(const ControlPadColor* colors, size_t count);
     
+    // 🚀 ATOMIC LED UPDATE IMPLEMENTATION - USB Interference Prevention
+    void pauseUSBPolling();
+    void resumeUSBPolling();
+
+    // ===== QUEUE-BASED LED SYSTEM FOR MIDI TIMING =====
+    // Uses proven TeensyAtomThreads queue system with DMA underneath
+    bool queueLEDUpdate(const ControlPadColor* colors, size_t count);
+    void processLEDCommandQueue(); // Call this in main loop
+    
+    // ===== DMA LED UPDATE SYSTEM FOR MIDI TIMING =====
+    // Non-blocking LED updates that don't interfere with MIDI timing
+    bool startAsyncLEDUpdate(const ControlPadColor* colors, size_t count);
+    bool isLEDUpdateInProgress();
+    void processAsyncLEDUpdate(); // Call this in main loop
+    
     // Friend class for hardware manager access
     friend class ControlPadHardware;
 };
@@ -147,18 +181,29 @@ public:
 
     // Only called by API layer
     void setAllLeds(const ControlPadColor* colors, size_t count);
-    void setFastMode(bool enabled);  // Enable/disable fast mode for rapid updates
+    //void setFastMode(bool enabled);  // Enable/disable fast mode for rapid updates
 
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
     ControlPad* currentPad = nullptr;
+
+    // Queue for events
+    ATOM_QUEUE* controlpad_queue = nullptr;
+    controlpad_event* controlpad_queue_data = nullptr;
+
+    // LED Command Queue for MIDI-timing-friendly updates
+    ATOM_QUEUE* led_command_queue = nullptr;
+    led_command_event* led_command_queue_data = nullptr;
+    void prepareLEDCommands(const ControlPadColor* colors, led_command_event* commands);
 
 private:
     // USB driver instance (managed by this class)
     USBControlPad* usbDriver = nullptr;
     
-    // Queue for events
-    ATOM_QUEUE* controlpad_queue = nullptr;
-    controlpad_event* controlpad_queue_data = nullptr;
+    // DMA LED update state
+    static DMAMEM DMALEDUpdate dmaLEDBuffer;
+    static void dmaLEDCallback(int result);
+    void prepareAsyncLEDCommands(const ControlPadColor* colors);
+    void sendNextDMACommand();
 };
 
 // Global driver instance pointer (used by USB factory system)

@@ -85,7 +85,7 @@ private:
     int hallValues[4];
 
     // Internal event queue
-    static const size_t EVENT_QUEUE_SIZE = 2;
+    static const size_t EVENT_QUEUE_SIZE = 16;  // Increased from 2 to handle rapid button events
     ControlPadEvent eventQueue[EVENT_QUEUE_SIZE];
     size_t eventHead = 0, eventTail = 0;
     
