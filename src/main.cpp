@@ -1,5 +1,14 @@
 #include <Arduino.h>
+#include <USBHost_t36.h>  // For USBHost Task() processing
 #include "ControlPad.h"
+#include "ControlPadHardware.h"  // For USBControlPad class
+
+// ===== USB HOST SETUP (USBHost_t36 standard pattern) =====
+// These must be declared at global scope for automatic driver discovery
+extern USBHost globalUSBHost;
+extern USBHub hub1, hub2;
+extern USBHIDParser hid1, hid2, hid3;
+extern USBControlPad globalControlPadDriver;
 
 // Create a ControlPad instance
 ControlPad controlPad;
@@ -10,12 +19,36 @@ void setup() {
     
     Serial.println("🚀 ControlPad Combined Package Test - Maximum LED Speed!");
     
+    // ===== USB HOST INITIALIZATION (USBHost_t36 standard pattern) =====
+    Serial.println("🔌 Starting USB Host (main.cpp pattern)...");
+    globalUSBHost.begin();
+    Serial.println("✅ USB Host started in main.cpp");
+    
+    // Standard driver callbacks removed - only our custom ControlPad driver is active
+    
+    // Give USB Host time to initialize and test basic detection
+    Serial.println("🧪 Testing USB Host for 3 seconds...");
+    for (int i = 0; i < 30; i++) {
+        globalUSBHost.Task();
+        delay(100);
+        if (i % 10 == 0) {
+            Serial.printf("   USB Host test %d/30\n", i + 1);
+        }
+    }
+    Serial.println("✅ USB Host basic test completed");
+    
+    delay(500);
+    
     if (!controlPad.begin()) {
         Serial.println("❌ Failed to initialize ControlPad");
         return;
     }
     
     Serial.println("✅ ControlPad initialized successfully!");
+    
+    // *** WAIT FOR DEVICE TO BE FULLY READY ***
+    Serial.println("⏳ Waiting for device to be ready for LED commands...");
+    delay(2000);  // Give device time to complete activation sequence
     
     // Disable smart updates - we want immediate LED updates for responsiveness
     controlPad.enableSmartUpdates(false);
@@ -41,81 +74,47 @@ void setup() {
     controlPad.forceUpdate();
     
     Serial.println("✅ Initial colors set and updated!");
+    
+    // *** START BUTTON ANIMATION ***
+    Serial.println("🎭 Starting button animation loop...");
+    controlPad.enableAnimation();
+    
     Serial.println("🎮 Ready for button events - press buttons to see WHITE highlighting!");
-    Serial.println("📌 Using new combined LED package system for reduced flicker");
+    Serial.println("📌 Using optimized LED package system for reduced flicker");
     Serial.println("💡 Buttons will highlight in WHITE when pressed, then return to original colors");
+    Serial.println("🎭 Animation: WHITE button cycling active (normal priority)");
+    Serial.println("⚡ Button presses: WHITE highlighting (HIGH priority)");
+    Serial.println("🔧 PROPER USB HOST PATTERN: Task() called every loop iteration (like official examples)");
 }
 
-uint32_t now = micros();
-
 void loop() {
-    // Still process USB events to keep the connection alive
-    controlPad.poll();
+    static uint32_t loopCounter = 0;
+    static unsigned long lastDebug = 0;
     
-    // Process any real button events (optional - you can disable this if you want only the loop)
-    ControlPadEvent event;
-    while (controlPad.pollEvent(event)) {
-        if (event.type == ControlPadEventType::Button) {
-            // Optional: Handle real button events alongside the automated loop
-            controlPad.setButtonHighlight(event.button.button, event.button.pressed);
-        }
-    }
+    loopCounter++;
     
-    // *** AUTOMATED HIGHLIGHT LOOP FOR TESTING ALL 24 BUTTONS ***
-    static unsigned long lastHighlightTime = 0;
-    static uint8_t currentHighlightButton = 0;
-    static bool highlightState = false; // false = unhighlighted, true = highlighted
-    static uint8_t highlightCounter = 0; // Track how many highlights we've done
-    static uint8_t passCounter = 0; // Track complete passes through all 24 buttons
+    // *** CRITICAL: ONLY USBHost_t36 Task() - This is the proper pattern ***
+    // All events come through USB callbacks, no custom polling needed
+    globalUSBHost.Task();
     
-    unsigned long currentTime = millis();
+    // *** UPDATE ANIMATION (non-blocking) ***
+    controlPad.updateAnimation();
     
-    // Change highlight every 200ms (optimized for new package structure)
-    if (currentTime - lastHighlightTime >= 200) {
-        lastHighlightTime = currentTime;
+    // *** ENHANCED DEBUG OUTPUT (temporarily for diagnostics) ***
+    // Show status every 1 second to monitor loop performance
+    if (millis() - lastDebug >= 1000) {  // Changed from 10000 to 1000
+        lastDebug = millis();
         
-        if (!highlightState) {
-            // Turn OFF the previous button's highlight
-            if (currentHighlightButton > 0) {
-                controlPad.setButtonHighlight(currentHighlightButton - 1, false);
-            } else {
-                // Wrap around - turn off button 23 when starting from button 0
-                controlPad.setButtonHighlight(23, false);
-            }
-            
-            // Turn ON the current button's highlight
-            controlPad.setButtonHighlight(currentHighlightButton, true);
-            Serial.printf("🔥 Highlighting button %d (LED index %d) [Count: %d]\n", 
-                         currentHighlightButton + 1, currentHighlightButton, highlightCounter);
-            
-            highlightState = true;
-            highlightCounter++;
-        } else {
-            // Turn OFF the current button's highlight
-            controlPad.setButtonHighlight(currentHighlightButton, false);
-            Serial.printf("⚡ Un-highlighting button %d (LED index %d)\n", currentHighlightButton + 1, currentHighlightButton);
-            
-            // Move to the next button
-            uint8_t nextButton = (currentHighlightButton + 1) % 24;
-            
-            // CYCLE RESET: Add pause when wrapping from button 23 back to button 0
-            // This prevents timing drift accumulation between cycles
-            if (currentHighlightButton == 23 && nextButton == 0) {
-                passCounter++;
-                Serial.printf("🔄 Pass %d completed: Wrapping from button 24 to button 1\n", passCounter);
-                
-                // SINGLE-PASS RESET: Reset after every pass since accumulation happens very quickly
-                if (passCounter % 2 == 0) {
-                    Serial.printf("🔄 EXTENDED RESET: Pass %d - Clearing accumulated state\n", passCounter);
-                    delay(75); // Longer reset every 2nd pass to prevent button 15 Package 2 issues
-                } else {
-                    Serial.printf("🔄 STANDARD RESET: Pass %d - Normal cycle break\n", passCounter);
-                    delay(35); // Slightly longer standard pause to prevent accumulation
-                }
-            }
-            
-            currentHighlightButton = nextButton;
-            highlightState = false;
-        }
+        // Get LED queue status for monitoring
+        size_t queueSize;
+        bool isProcessing;
+        getLEDQueueStatus(&queueSize, &isProcessing);
+        
+        Serial.printf("🎵 MIDI-Ready: Loop #%lu (1s) - Queue: %zu items, Processing: %s\n", 
+                     loopCounter, queueSize, isProcessing ? "YES" : "NO");
     }
+    
+    // *** MAIN LOOP IS NOW OPTIMIZED FOR MIDI TIMING ***
+    // No delays, no blocking calls, no custom polling
+    // All button events come through USB callbacks in ControlPadHardware.cpp
 }

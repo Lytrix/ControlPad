@@ -124,12 +124,17 @@ struct DMALEDUpdate {
     volatile int currentCommand; // Which command (0-3) is being sent
 };
 
-// ===== USB DRIVER CLASS =====
-// This is the actual USB driver that inherits from USBDriver
-class USBControlPad : public USBDriver {
+// ===== USB HID INPUT CLASS =====
+// This inherits from USBHIDInput to work WITH HID parsers, not compete against them
+class USBControlPad : public USBHIDInput {
 private:
     USBHost *myusb;
-    Device_t *device_ = nullptr;  // USB device
+    Device_t *device_ = nullptr;  // USB device (old USBDriver interface)
+    
+    // USBHIDInput interface variables
+    Device_t *mydevice = nullptr;  // Device for USBHIDInput interface
+    USBHIDParser *driver_ = nullptr;  // HID parser driver
+    uint32_t usage_ = 0;  // HID top-level usage
     
     // Required USBHost_t36 member variables
     Pipe_t mypipes[7] __attribute__ ((aligned(32)));
@@ -204,12 +209,22 @@ public:
     virtual ~USBControlPad() = default;
     
     // USBDriver virtual methods
-    bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len) override;
-    void disconnect() override;
-    void control(const Transfer_t *transfer) override;
+    // USBHIDInput interface methods  
+    virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
+    virtual void disconnect_collection(Device_t *dev);
+    virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+    virtual void hid_input_data(uint32_t usage, int32_t value);
+    virtual void hid_input_end();
+    virtual bool hid_process_in_data(const Transfer_t *transfer);
+    virtual bool hid_process_out_data(const Transfer_t *transfer);
     
+private:
+    void init();
+    
+public:
     // USB driver functionality
     bool begin(DMAQueue<controlpad_event, 16> *q);
+    bool sendActivationSequence();
     void setupQuadInterface();
     void startQuadPolling();
     bool sendUSBInterfaceReSponseActivation();
@@ -228,7 +243,7 @@ public:
     bool sendLEDPackage2(const ControlPadColor* colors); // Deprecated - use sendLEDPackages instead
     bool sendApplyCommand();
     bool sendFinalizeCommand();
-    bool updateAllLEDs(const ControlPadColor* colors, size_t count);
+    bool updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority = false);
     
     // 🚀 ATOMIC LED UPDATE IMPLEMENTATION - USB Interference Prevention
     void pauseUSBPolling();
@@ -243,7 +258,7 @@ public:
     // Non-blocking LED updates that don't interfere with MIDI timing
     bool startAsyncLEDUpdate(const ControlPadColor* colors, size_t count);
     bool isLEDUpdateInProgress();
-    void processAsyncLEDUpdate(); // Call this in main loop
+    // processAsyncLEDUpdate removed - using direct USBHost_t36 transfers
     
     // Friend class for hardware manager access
     friend class ControlPadHardware;
@@ -265,8 +280,14 @@ public:
     void processHallSensorData(const uint8_t* data, size_t length);
 
     // Only called by API layer
-    void setAllLeds(const ControlPadColor* colors, size_t count);
+    bool setAllLeds(const ControlPadColor* colors, size_t count);
     //void setFastMode(bool enabled);  // Enable/disable fast mode for rapid updates
+    
+    // *** ANIMATION SYSTEM ***
+    void enableAnimation();
+    void disableAnimation();
+    void updateAnimation();
+    bool isAnimationEnabled() const;
 
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
     ControlPad* currentPad = nullptr;
@@ -300,3 +321,6 @@ extern USBControlPad globalControlPadDriver;
 
 extern USBControlPad* controlPadDriver;
 extern ControlPadHardware* globalHardwareInstance;
+
+// ===== LED QUEUE MONITORING FUNCTIONS =====
+void getLEDQueueStatus(size_t* queueSize, bool* isProcessing);
