@@ -19,7 +19,7 @@ bbbbbbbb //custom mode
 ff000000
 0000
 ff
-ff //brighness for all leds
+ff //brightness for all leds
 
 00000000
 

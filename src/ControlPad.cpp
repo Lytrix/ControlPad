@@ -288,9 +288,9 @@ void ControlPad::setUpdateInterval(unsigned long intervalMs) {
 
 void ControlPad::enableInstantUpdates(bool instant) {
     if (instant) {
-        updateInterval = 25; // Faster updates but still safe for USB ACK timing
+        updateInterval = 10; // Very fast updates with new package structure
     } else {
-        updateInterval = 50; // Standard safe rate limiting
+        updateInterval = 30; // Standard safe rate limiting
     }
 }
 
@@ -361,15 +361,15 @@ void ControlPad::updateSmartLeds() {
     static unsigned long lastUSBActivityTime = 0;
     static bool needsQuietTime = false;
     
+    // Require quiet period after button events before LED updates
+    const unsigned long USB_QUIET_TIME_REQUIRED = 50; // Reduced to 50ms with new package structure
+    
     // Only set quiet time requirement on FIRST call with dirty LEDs
     if (ledsDirty && !needsQuietTime) {
         lastUSBActivityTime = currentTime; // Mark when we first detected dirty LEDs
         needsQuietTime = true; // Flag that we need to wait for quiet time
-        Serial.printf("🎯 First dirty LED detected - starting %lums quiet time countdown\n", (unsigned long)200);
+        Serial.printf("🎯 First dirty LED detected - starting %lums quiet time countdown\n", (unsigned long)USB_QUIET_TIME_REQUIRED);
     }
-    
-    // Require quiet period after button events before LED updates
-    const unsigned long USB_QUIET_TIME_REQUIRED = 200; // 200ms quiet time
     unsigned long timeSinceUSBActivity = currentTime - lastUSBActivityTime;
     
     // Check if we still need to wait for quiet time
@@ -387,8 +387,8 @@ void ControlPad::updateSmartLeds() {
     
     Serial.println("🎨 updateSmartLeds: Starting LED update after USB quiet period");
     
-    // Add aggressive pre-delay to ensure USB is completely quiet
-    delay(50);
+    // Brief pre-delay to ensure USB is quiet
+    delay(10);
     
     // ATOMIC UPDATE: Build complete state first, then send all at once
     bool hasChanges = false;
@@ -413,8 +413,8 @@ void ControlPad::updateSmartLeds() {
                      (int)std::count(ledDirtyFlags, ledDirtyFlags + CONTROLPAD_NUM_BUTTONS, true));
         hw->setAllLeds(tempState, CONTROLPAD_NUM_BUTTONS);
         
-        // Add aggressive post-delay to let LED communication settle completely
-        delay(100);
+        // Brief post-delay to let LED communication settle
+        delay(25);
         
         // Only clear flags AFTER successful hardware update
         for (uint8_t i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
