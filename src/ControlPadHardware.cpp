@@ -76,32 +76,71 @@ struct QueuedLEDCommand {
     bool priority;       // High priority for button events
 };
 
+// Global queue size configuration
+static const size_t GLOBAL_LED_QUEUE_SIZE = 128
+;  // Optimized buffer for MIDI application 
+
+// Forward declaration for static member
+class LEDCommandQueue;
+
 class LEDCommandQueue {
 private:
-    static const size_t MAX_QUEUED = 64;  // Double the buffer for faster updates
-    QueuedLEDCommand commands[MAX_QUEUED];
+    QueuedLEDCommand commands[GLOBAL_LED_QUEUE_SIZE];
     volatile size_t head = 0;
     volatile size_t tail = 0;
     volatile size_t count = 0;
     volatile bool processing = false;
     
+    // *** SIMPLIFIED INTERRUPT-SAFE MUTEX PROTECTION ***
+    // Simple atomic operations without timeouts or complex logic
+    
+    inline void enterCritical() const {
+        noInterrupts();
+    }
+    
+    inline void exitCritical() const {
+        interrupts();
+    }
+    
+    // Simple atomic read operations
+    size_t atomicReadCount() const {
+        enterCritical();
+        size_t result = count;
+        exitCritical();
+        return result;
+    }
+    
+    size_t atomicReadHead() const {
+        enterCritical();
+        size_t result = head;
+        exitCritical();
+        return result;
+    }
+    
+    size_t atomicReadTail() const {
+        enterCritical();
+        size_t result = tail;
+        exitCritical();
+        return result;
+    }
+    
 public:
-    // *** ATOMIC 2-PACKET LED DATA ENQUEUING - REDUCED BANDWIDTH ***
+    // *** ATOMIC LED DATA PACKET ENQUEUING for Package1 & Package2 ***
     bool enqueueLEDData(const uint8_t* pkg1, const uint8_t* pkg2, bool priority = false) {
         // Check if we have space for 2 LED data packets atomically
-        if (count > (MAX_QUEUED - 2)) {
-            Serial.printf("⚠️ LED queue full - need 2 slots, have %zu available\n", MAX_QUEUED - count);
+        if (atomicReadCount() > (GLOBAL_LED_QUEUE_SIZE - 2)) {
+            Serial.printf("⚠️ LED queue full - need 2 slots, have %zu available\n", GLOBAL_LED_QUEUE_SIZE - atomicReadCount());
             digitalWrite(DEBUG_PIN_QUEUE_FULL, HIGH);
             delayMicroseconds(50);
             digitalWrite(DEBUG_PIN_QUEUE_FULL, LOW);
             return false;
         }
         
-        __disable_irq();
+        enterCritical();
         
         if (priority) {
             // *** HIGH PRIORITY: Insert LED data packets at front ***
-            tail = (tail - 2 + MAX_QUEUED) % MAX_QUEUED;
+            tail = (tail - 2 + GLOBAL_LED_QUEUE_SIZE) % GLOBAL_LED_QUEUE_SIZE;
             size_t pos = tail;
             
             // Package1
@@ -109,7 +148,7 @@ public:
             commands[pos].length = 64;
             commands[pos].commandType = 1;
             commands[pos].priority = priority;
-            pos = (pos + 1) % MAX_QUEUED;
+            pos = (pos + 1) % GLOBAL_LED_QUEUE_SIZE;
             
             // Package2
             memcpy(commands[pos].data, pkg2, 64);
@@ -126,7 +165,7 @@ public:
             commands[pos].length = 64;
             commands[pos].commandType = 1;
             commands[pos].priority = priority;
-            pos = (pos + 1) % MAX_QUEUED;
+            pos = (pos + 1) % GLOBAL_LED_QUEUE_SIZE;
             
             // Package2
             memcpy(commands[pos].data, pkg2, 64);
@@ -134,13 +173,12 @@ public:
             commands[pos].commandType = 2;
             commands[pos].priority = priority;
             
-            head = (head + 2) % MAX_QUEUED;
+            head = (head + 2) % GLOBAL_LED_QUEUE_SIZE;
         }
         
         count += 2;
         
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
+        exitCritical();
         
         if (!processing) {
             processNext();
@@ -151,14 +189,14 @@ public:
     
     // *** SINGLE PACKET ENQUEUING for Apply commands ***
     bool enqueueSingle(const uint8_t* data, uint8_t type, bool priority = false) {
-        if (count >= MAX_QUEUED) {
+        if (atomicReadCount() >= GLOBAL_LED_QUEUE_SIZE) {
             return false;
         }
         
-        __disable_irq();
+        enterCritical();
         
         if (priority) {
-            tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
+            tail = (tail - 1 + GLOBAL_LED_QUEUE_SIZE) % GLOBAL_LED_QUEUE_SIZE;
             memcpy(commands[tail].data, data, 64);
             commands[tail].length = 64;
             commands[tail].commandType = type;
@@ -168,12 +206,12 @@ public:
             commands[head].length = 64;
             commands[head].commandType = type;
             commands[head].priority = priority;
-            head = (head + 1) % MAX_QUEUED;
+            head = (head + 1) % GLOBAL_LED_QUEUE_SIZE;
         }
         
         count++;
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
+        
+        exitCritical();
         
         if (!processing) {
             processNext();
@@ -185,15 +223,15 @@ public:
     bool enqueue(const uint8_t* data, size_t length, uint8_t type, bool priority = false) {
         Serial.println("⚠️ WARNING: Using deprecated single enqueue() - use enqueueSequence() for atomic operations");
         
-        if (count >= MAX_QUEUED) {
+        if (atomicReadCount() >= GLOBAL_LED_QUEUE_SIZE) {
             Serial.println("⚠️ LED command queue full!");
             return false;
         }
         
-        __disable_irq();
+        enterCritical();
         
         if (priority) {
-            tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
+            tail = (tail - 1 + GLOBAL_LED_QUEUE_SIZE) % GLOBAL_LED_QUEUE_SIZE;
             memcpy(commands[tail].data, data, length);
             commands[tail].length = length;
             commands[tail].commandType = type;
@@ -203,12 +241,12 @@ public:
             commands[head].length = length;
             commands[head].commandType = type;
             commands[head].priority = priority;
-            head = (head + 1) % MAX_QUEUED;
+            head = (head + 1) % GLOBAL_LED_QUEUE_SIZE;
         }
         
         count++;
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
+        
+        exitCritical();
         
         if (!processing) {
             processNext();
@@ -217,20 +255,22 @@ public:
     }
     
     bool dequeue(QueuedLEDCommand& cmd) {
-        if (count == 0) return false;
+        if (atomicReadCount() == 0) return false;
         
-        __disable_irq();
+        enterCritical();
+        
         cmd = commands[tail];
-        tail = (tail + 1) % MAX_QUEUED;
+        tail = (tail + 1) % GLOBAL_LED_QUEUE_SIZE;
         count--;
-        __enable_irq();
+        
+        exitCritical();
         
         return true;
     }
     
     void processNext() {
         // *** CRITICAL: Only process if not already processing and queue has items ***
-        if (processing || count == 0) return;
+        if (processing || atomicReadCount() == 0) return;
         
         processing = true;
         QueuedLEDCommand cmd;
@@ -256,17 +296,21 @@ public:
         processNext(); // Process next command in queue
     }
     
-    size_t size() const { return count; }
-    bool empty() const { return count == 0; }
+    size_t size() const { return atomicReadCount(); }
+    bool empty() const { return atomicReadCount() == 0; }
     bool isProcessing() const { return processing; }
-    size_t getHead() const { return head; }
-    size_t getTail() const { return tail; }
+    size_t getHead() const { return atomicReadHead(); }
+    size_t getTail() const { 
+        return atomicReadTail();
+    }
 
 };
 
+// Simplified mutex - no static members needed
+
 static LEDCommandQueue ledQueue;
 
-// ===== USB BANDWIDTH MONITORING WITH QUEUE TRACKING =====
+// ===== ENHANCED USB BANDWIDTH MONITORING WITH ADAPTIVE CONTROL =====
 struct USBBandwidthMonitor {
     uint32_t transfers_per_second = 0;
     uint32_t bytes_per_second = 0;
@@ -275,50 +319,125 @@ struct USBBandwidthMonitor {
     uint32_t byte_count = 0;
     uint32_t last_queue_position = 999; // Track queue wraparound
     
+    // *** SATURATION DETECTION AND ADAPTIVE TIMING ***
+    uint32_t saturation_events = 0;
+    uint32_t consecutive_high_queue = 0;
+    bool is_saturated = false;
+    uint32_t last_saturation_check = 0;
+    uint32_t recommended_interval = 50; // Start with 50ms, adapt based on conditions
+    
+    // *** NEW: Track high position frequency over time window ***
+    static const uint8_t POSITION_HISTORY_SIZE = 20;
+    size_t position_history[POSITION_HISTORY_SIZE];
+    uint8_t history_index = 0;
+    bool history_filled = false;
+    
     void recordTransfer(size_t bytes) {
         transfer_count++;
         byte_count += bytes;
         
-        // *** ENHANCED QUEUE MONITORING WITH ANOMALY DETECTION ***
+        // *** ENHANCED QUEUE MONITORING WITH SATURATION DETECTION ***
         size_t current_queue_size = ledQueue.size();
-        size_t current_queue_pos = (ledQueue.getHead() + current_queue_size - 1) % 64;
+        size_t current_queue_pos = (ledQueue.getHead() + current_queue_size - 1) % GLOBAL_LED_QUEUE_SIZE;
+        
+        // *** SATURATION DETECTION ALGORITHM ***
+        detectSaturation(current_queue_size, current_queue_pos);
         
         // Detect significant wraparounds only (reduced logging) 
-        if (last_queue_position > current_queue_pos && last_queue_position > 56) {
-            Serial.printf("🔄 MAJOR WRAPAROUND: %lu → %lu (size=%zu)\n", 
-                         last_queue_position, current_queue_pos, current_queue_size);
-        }
-        
-        // *** LED DATA PAIR TRACKING ***
-        // With new split approach: LED data comes in pairs (2), Apply commands are singles
-        // Normal queue progression: varies based on LED pairs + individual apply commands
-        static uint32_t last_check_time = 0;
-        static size_t last_check_size = 0;
-        
-        // Only check for stuck queues every few seconds to reduce noise
-        if (millis() - last_check_time > 3000) {
-            if (current_queue_size > 0 && last_check_size == current_queue_size) {
-                Serial.printf("⚠️ Queue unchanged at size %zu for >3sec\n", current_queue_size);
-            }
-            last_check_size = current_queue_size;
-            last_check_time = millis();
+        if (last_queue_position > current_queue_pos && last_queue_position > (GLOBAL_LED_QUEUE_SIZE - 8)) {
+            Serial.printf("🔄 WRAPAROUND: %lu → %lu (size=%zu) %s\n", 
+                         last_queue_position, current_queue_pos, current_queue_size,
+                         is_saturated ? "[SATURATED]" : "[OK]");
         }
         
         last_queue_position = current_queue_pos;
         
-        // Report bandwidth every 10 seconds (reduced frequency)
-        if (millis() - last_report_time > 10000) {
-            // Reset counters quietly
+        // Report bandwidth and recommendations every 5 seconds
+        if (millis() - last_report_time > 5000) {
+            reportStatus();
             transfer_count = 0;
             byte_count = 0;
             last_report_time = millis();
         }
     }
+    
+    void detectSaturation(size_t queue_size, size_t queue_pos) {
+        uint32_t now = millis();
+        
+        // Check for saturation indicators every 100ms
+        if (now - last_saturation_check < 100) return;
+        last_saturation_check = now;
+        
+        // *** NEW: Record position history for frequency analysis ***
+        position_history[history_index] = queue_pos;
+        history_index = (history_index + 1) % POSITION_HISTORY_SIZE;
+        if (history_index == 0) history_filled = true;
+        
+        // Only analyze if we have enough history
+        if (!history_filled && history_index < 10) return;
+        
+        // *** FREQUENCY-BASED SATURATION DETECTION ***
+        // Count how many recent positions were >90% of buffer capacity
+        size_t high_threshold = (size_t)(GLOBAL_LED_QUEUE_SIZE * 0.9); // >115 for 128-item buffer
+        uint8_t high_position_count = 0;
+        uint8_t samples_to_check = history_filled ? POSITION_HISTORY_SIZE : history_index;
+        
+        for (uint8_t i = 0; i < samples_to_check; i++) {
+            if (position_history[i] > high_threshold) {
+                high_position_count++;
+            }
+        }
+        
+        // Saturation if >60% of recent positions are high (12/20 or 6/10)
+        float high_position_ratio = (float)high_position_count / samples_to_check;
+        bool was_saturated = is_saturated;
+        is_saturated = (high_position_ratio > 0.6);
+        
+        if (is_saturated && !was_saturated) {
+            saturation_events++;
+            adaptTiming();
+            Serial.printf("🚨 USB SATURATION DETECTED! %u/%u positions >%zu (%.1f%%), Event #%lu - Adapting timing to %lums\n", 
+                         high_position_count, samples_to_check, high_threshold, 
+                         high_position_ratio * 100.0f, saturation_events, recommended_interval);
+        } else if (!is_saturated && was_saturated) {
+            Serial.printf("✅ USB saturation cleared - %u/%u positions >%zu (%.1f%%) back to normal\n",
+                         high_position_count, samples_to_check, high_threshold, high_position_ratio * 100.0f);
+        }
+    }
+    
+    void adaptTiming() {
+        // Adaptive timing algorithm based on saturation frequency
+        if (saturation_events == 1) {
+            recommended_interval = 75;  // First saturation: slow down moderately
+        } else if (saturation_events <= 3) {
+            recommended_interval = 100; // Multiple saturations: slow down more
+        } else if (saturation_events <= 5) {
+            recommended_interval = 150; // Persistent issues: much slower
+        } else {
+            recommended_interval = 200; // Severe issues: fallback to safest timing
+        }
+    }
+    
+    void reportStatus() {
+        if (saturation_events > 0) {
+            Serial.printf("📊 USB Status: %s | Queue avg: %zu | Saturations: %lu | Recommended interval: %lums\n",
+                         is_saturated ? "SATURATED" : "OK", 
+                         ledQueue.size(), saturation_events, recommended_interval);
+        }
+    }
+    
+    uint32_t getRecommendedInterval() const {
+        return recommended_interval;
+    }
+    
+    bool isSaturated() const {
+        return is_saturated;
+    }
 };
 
 static USBBandwidthMonitor bandwidthMonitor;
 
-// *** UNIFIED LED STATE MANAGER ***
+// *** UNIFIED LED STATE MANAGER WITH BUTTON BATCHING ***
 class UnifiedLEDManager {
 private:
     static const ControlPadColor BASE_COLORS[24];
@@ -331,6 +450,14 @@ private:
     uint8_t lastSentAnimationStep = 255; // Track what was last sent (255 = never sent)
     bool animationEnabled = false;
     
+    // *** BUTTON BATCHING SYSTEM ***
+    bool buttonStateChanged = false;
+    uint32_t firstButtonChangeTime = 0;
+    uint32_t lastButtonChangeTime = 0;
+    static const uint32_t BUTTON_BATCH_TIMEOUT_MS = 20; // Collect button changes for 20ms
+    static const uint32_t MAX_BUTTON_BATCH_DELAY_MS = 50; // Never delay more than 50ms
+    uint8_t buttonChangesInBatch = 0;
+    
 public:
     void setAnimationEnabled(bool enabled) {
         animationEnabled = enabled;
@@ -342,7 +469,25 @@ public:
     void setButtonState(uint8_t buttonIndex, bool pressed) {
         if (buttonIndex < 24 && buttonStates[buttonIndex] != pressed) {
             buttonStates[buttonIndex] = pressed;
-            stateChanged = true;
+            
+            // *** BUTTON BATCHING LOGIC ***
+            uint32_t now = millis();
+            
+            if (!buttonStateChanged) {
+                // First button change in a potential batch
+                firstButtonChangeTime = now;
+                buttonStateChanged = true;
+                buttonChangesInBatch = 1;
+                Serial.printf("🎮 Button batch started: Button %u %s\n", 
+                             buttonIndex, pressed ? "pressed" : "released");
+            } else {
+                // Additional button change - extend batch
+                buttonChangesInBatch++;
+                Serial.printf("🎮 Button batch +%u: Button %u %s (total: %u changes)\n", 
+                             buttonChangesInBatch, buttonIndex, pressed ? "pressed" : "released", buttonChangesInBatch);
+            }
+            
+            lastButtonChangeTime = now;
         }
     }
     
@@ -356,9 +501,11 @@ public:
         
         // Apply animation if enabled
         if (animationEnabled) {
-            // Cycle through buttons with white highlight every 100ms (smooth visual movement)
+            // Cycle through buttons with adaptive timing based on USB bandwidth
             uint32_t currentTime = millis();
-            if (currentTime - animationTime >= 100) {
+            uint32_t adaptiveInterval = bandwidthMonitor.getRecommendedInterval();
+            
+            if (currentTime - animationTime >= adaptiveInterval) {
                 animationStep = (animationStep + 1) % 24;
                 animationTime = currentTime;
             }
@@ -379,13 +526,40 @@ public:
     bool shouldSendUpdate() {
         uint32_t currentTime = millis();
         
-        // Always send if state changed due to button press/release
+        // *** BUTTON BATCHING: Check if we should send batched button updates ***
+        if (buttonStateChanged) {
+            uint32_t timeSinceFirstChange = currentTime - firstButtonChangeTime;
+            uint32_t timeSinceLastChange = currentTime - lastButtonChangeTime;
+            
+            // Send batched update if:
+            // 1. No new button changes for BUTTON_BATCH_TIMEOUT_MS (20ms quiet period)
+            // 2. OR we've been collecting for MAX_BUTTON_BATCH_DELAY_MS (50ms max delay)
+            if (timeSinceLastChange >= BUTTON_BATCH_TIMEOUT_MS || 
+                timeSinceFirstChange >= MAX_BUTTON_BATCH_DELAY_MS) {
+                
+                Serial.printf("🎮 Sending button batch: %u changes over %lums (quiet for %lums)\n",
+                             buttonChangesInBatch, timeSinceFirstChange, timeSinceLastChange);
+                             
+                // Reset batching state and trigger LED update
+                buttonStateChanged = false;
+                buttonChangesInBatch = 0;
+                stateChanged = true;
+                return true;
+            }
+            // Still collecting button changes, don't send yet
+            return false;
+        }
+        
+        // Regular animation updates (if no button batching in progress)
         if (stateChanged) return true;
         
-        // For animation: only send update when animation step actually changes
+        // For animation: use adaptive timing based on USB bandwidth monitoring
         if (animationEnabled) {
-            // Update animation step if enough time has passed
-            if (currentTime - animationTime >= 100) {
+            // Get recommended interval from bandwidth monitor
+            uint32_t adaptiveInterval = bandwidthMonitor.getRecommendedInterval();
+            
+            // Update animation step if enough time has passed (adaptive timing)
+            if (currentTime - animationTime >= adaptiveInterval) {
                 uint8_t nextStep = (animationStep + 1) % 24;
                 if (nextStep != lastSentAnimationStep) {
                     stateChanged = true; // Animation step changed, need to send update
