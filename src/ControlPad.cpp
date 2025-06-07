@@ -492,6 +492,18 @@ void ControlPad::updateAnimation() {
     }
 }
 
+void ControlPad::updateButtonHighlights() {
+    if (hw) {
+        hw->updateButtonHighlights();
+    }
+}
+
+void ControlPad::updateUnifiedLEDs() {
+    if (hw) {
+        hw->updateUnifiedLEDs();
+    }
+}
+
 bool ControlPad::isAnimationEnabled() const {
     if (hw) {
         return hw->isAnimationEnabled();

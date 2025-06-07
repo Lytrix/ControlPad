@@ -287,6 +287,8 @@ public:
     void enableAnimation();
     void disableAnimation();
     void updateAnimation();
+    void updateButtonHighlights();
+    void updateUnifiedLEDs();
     bool isAnimationEnabled() const;
 
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
