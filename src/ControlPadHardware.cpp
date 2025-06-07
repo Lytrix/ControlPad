@@ -37,6 +37,36 @@ USBHIDInput *hidInputDrivers[] = {&globalControlPadDriver};
 const char * hid_driver_names[CNT_HID_DEVICES] = {"ControlPad"};
 bool hid_driver_active[CNT_HID_DEVICES] = {false};
 
+// ===== HARDWARE DEBUG PINS FOR TIMING ANALYSIS =====
+// Use these pins with oscilloscope/logic analyzer to see timing issues
+#define DEBUG_PIN_USB_START     14  // Goes HIGH when USB transfer starts
+#define DEBUG_PIN_USB_COMPLETE  15  // Goes HIGH when USB transfer completes  
+#define DEBUG_PIN_LED_UPDATE    16  // Goes HIGH during LED updates
+#define DEBUG_PIN_QUEUE_FULL    17  // Goes HIGH when LED queue is full
+
+static bool debug_pins_initialized = false;
+
+static void initDebugPins() {
+    if (debug_pins_initialized) return;
+    
+    pinMode(DEBUG_PIN_USB_START, OUTPUT);
+    pinMode(DEBUG_PIN_USB_COMPLETE, OUTPUT);
+    pinMode(DEBUG_PIN_LED_UPDATE, OUTPUT);
+    pinMode(DEBUG_PIN_QUEUE_FULL, OUTPUT);
+    
+    digitalWrite(DEBUG_PIN_USB_START, LOW);
+    digitalWrite(DEBUG_PIN_USB_COMPLETE, LOW);
+    digitalWrite(DEBUG_PIN_LED_UPDATE, LOW);
+    digitalWrite(DEBUG_PIN_QUEUE_FULL, LOW);
+    
+    debug_pins_initialized = true;
+    Serial.println("🔧 Hardware debug pins initialized:");
+    Serial.printf("   Pin %d: USB transfer start\n", DEBUG_PIN_USB_START);
+    Serial.printf("   Pin %d: USB transfer complete\n", DEBUG_PIN_USB_COMPLETE);
+    Serial.printf("   Pin %d: LED update active\n", DEBUG_PIN_LED_UPDATE);
+    Serial.printf("   Pin %d: Queue full condition\n", DEBUG_PIN_QUEUE_FULL);
+}
+
 // ===== LED COMMAND QUEUE SYSTEM =====
 // Using USBHost_t36 proper queuing pattern to avoid USB contention
 struct QueuedLEDCommand {
@@ -48,47 +78,139 @@ struct QueuedLEDCommand {
 
 class LEDCommandQueue {
 private:
-    static const size_t MAX_QUEUED = 32;
+    static const size_t MAX_QUEUED = 64;  // Double the buffer for faster updates
     QueuedLEDCommand commands[MAX_QUEUED];
     volatile size_t head = 0;
     volatile size_t tail = 0;
     volatile size_t count = 0;
     volatile bool processing = false;
-    volatile bool batchInsertion = false;  // Flag to prevent processing during batch insertion
     
 public:
-    bool enqueue(const uint8_t* data, size_t length, uint8_t type, bool priority = false) {
-        if (count >= MAX_QUEUED) {
-            Serial.println("⚠️  LED command queue full!");
+    // *** ATOMIC 2-PACKET LED DATA ENQUEUING - REDUCED BANDWIDTH ***
+    bool enqueueLEDData(const uint8_t* pkg1, const uint8_t* pkg2, bool priority = false) {
+        // Check if we have space for 2 LED data packets atomically
+        if (count > (MAX_QUEUED - 2)) {
+            Serial.printf("⚠️ LED queue full - need 2 slots, have %zu available\n", MAX_QUEUED - count);
+            digitalWrite(DEBUG_PIN_QUEUE_FULL, HIGH);
+            delayMicroseconds(50);
+            digitalWrite(DEBUG_PIN_QUEUE_FULL, LOW);
             return false;
         }
         
         __disable_irq();
         
         if (priority) {
-            // *** PRIORITY COMMANDS ALWAYS GO TO FRONT (regardless of queue state) ***
+            // *** HIGH PRIORITY: Insert LED data packets at front ***
+            tail = (tail - 2 + MAX_QUEUED) % MAX_QUEUED;
+            size_t pos = tail;
+            
+            // Package1
+            memcpy(commands[pos].data, pkg1, 64);
+            commands[pos].length = 64;
+            commands[pos].commandType = 1;
+            commands[pos].priority = priority;
+            pos = (pos + 1) % MAX_QUEUED;
+            
+            // Package2
+            memcpy(commands[pos].data, pkg2, 64);
+            commands[pos].length = 64;
+            commands[pos].commandType = 2;
+            commands[pos].priority = priority;
+            
+        } else {
+            // *** NORMAL PRIORITY: Insert at head (back of queue) ***
+            size_t pos = head;
+            
+            // Package1
+            memcpy(commands[pos].data, pkg1, 64);
+            commands[pos].length = 64;
+            commands[pos].commandType = 1;
+            commands[pos].priority = priority;
+            pos = (pos + 1) % MAX_QUEUED;
+            
+            // Package2
+            memcpy(commands[pos].data, pkg2, 64);
+            commands[pos].length = 64;
+            commands[pos].commandType = 2;
+            commands[pos].priority = priority;
+            
+            head = (head + 2) % MAX_QUEUED;
+        }
+        
+        count += 2;
+        
+        asm volatile("dmb" ::: "memory");
+        __enable_irq();
+        
+        if (!processing) {
+            processNext();
+        }
+        
+        return true;
+    }
+    
+    // *** SINGLE PACKET ENQUEUING for Apply commands ***
+    bool enqueueSingle(const uint8_t* data, uint8_t type, bool priority = false) {
+        if (count >= MAX_QUEUED) {
+            return false;
+        }
+        
+        __disable_irq();
+        
+        if (priority) {
+            tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
+            memcpy(commands[tail].data, data, 64);
+            commands[tail].length = 64;
+            commands[tail].commandType = type;
+            commands[tail].priority = priority;
+        } else {
+            memcpy(commands[head].data, data, 64);
+            commands[head].length = 64;
+            commands[head].commandType = type;
+            commands[head].priority = priority;
+            head = (head + 1) % MAX_QUEUED;
+        }
+        
+        count++;
+        asm volatile("dmb" ::: "memory");
+        __enable_irq();
+        
+        if (!processing) {
+            processNext();
+        }
+        return true;
+    }
+    
+    // *** DEPRECATED - Use enqueueSequence instead ***
+    bool enqueue(const uint8_t* data, size_t length, uint8_t type, bool priority = false) {
+        Serial.println("⚠️ WARNING: Using deprecated single enqueue() - use enqueueSequence() for atomic operations");
+        
+        if (count >= MAX_QUEUED) {
+            Serial.println("⚠️ LED command queue full!");
+            return false;
+        }
+        
+        __disable_irq();
+        
+        if (priority) {
             tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
             memcpy(commands[tail].data, data, length);
             commands[tail].length = length;
             commands[tail].commandType = type;
             commands[tail].priority = priority;
-            Serial.printf("🚀 HIGH PRIORITY command type %d inserted at FRONT (pos %zu)\n", type, tail);
         } else {
-            // *** NORMAL INSERTION: Insert at head position (back of queue) ***
             memcpy(commands[head].data, data, length);
             commands[head].length = length;
             commands[head].commandType = type;
             commands[head].priority = priority;
             head = (head + 1) % MAX_QUEUED;
-            Serial.printf("📤 Normal command type %d inserted at BACK (pos %zu)\n", type, (head - 1 + MAX_QUEUED) % MAX_QUEUED);
         }
         
         count++;
+        asm volatile("dmb" ::: "memory");
         __enable_irq();
         
-        // *** PROPER USBHost_t36 PATTERN: Only start processing if not already active ***
-        // Don't call processNext() if processing or batch insertion is active
-        if (!processing && !batchInsertion) {
+        if (!processing) {
             processNext();
         }
         return true;
@@ -114,8 +236,6 @@ public:
         QueuedLEDCommand cmd;
         if (dequeue(cmd)) {
             // *** ACTUALLY SEND THE COMMAND via USBHost_t36 ***
-            Serial.printf("📤 Processing queued LED command type %d (queue size: %zu)\n", 
-                         cmd.commandType, count + 1);
             
             bool success = globalControlPadDriver.sendCommand(cmd.data, cmd.length);
             if (!success) {
@@ -132,43 +252,227 @@ public:
     
     void onCommandComplete() {
         // *** Called from USB callback when command completes ***
-        Serial.printf("✅ LED command completed, processing next (queue size: %zu)\n", count);
         processing = false;
-        
-        // *** Check if batch insertion is active - don't start new processing ***
-        if (batchInsertion) {
-            Serial.println("⏸️ Batch insertion active - skipping processNext()");
-            return;
-        }
-        
-        // *** CRITICAL: 10ms delay between packets for ControlPad device (reduce flicker) ***
-        delayMicroseconds(750);
         processNext(); // Process next command in queue
     }
     
     size_t size() const { return count; }
     bool empty() const { return count == 0; }
     bool isProcessing() const { return processing; }
-    
-    // *** BATCH INSERTION CONTROL (prevent processing during multi-command insertion) ***
-    void forceStopProcessing() { batchInsertion = true; }
-    void resumeProcessing() { 
-        batchInsertion = false; 
-        processNext(); // Start processing queued commands
-    }
+    size_t getHead() const { return head; }
+    size_t getTail() const { return tail; }
+
 };
 
 static LEDCommandQueue ledQueue;
 
-// *** BUTTON DEBOUNCING: Track last button states and timing ***
-static uint32_t lastButtonStates[24] = {0}; // Timestamp of last state change for each button
-static bool currentButtonStates[24] = {false}; // Current pressed state for each button
-static const uint32_t DEBOUNCE_DELAY_MS = 50; // 50ms debouncing
+// ===== USB BANDWIDTH MONITORING WITH QUEUE TRACKING =====
+struct USBBandwidthMonitor {
+    uint32_t transfers_per_second = 0;
+    uint32_t bytes_per_second = 0;
+    uint32_t last_report_time = 0;
+    uint32_t transfer_count = 0;
+    uint32_t byte_count = 0;
+    uint32_t last_queue_position = 999; // Track queue wraparound
+    
+    void recordTransfer(size_t bytes) {
+        transfer_count++;
+        byte_count += bytes;
+        
+        // *** ENHANCED QUEUE MONITORING WITH ANOMALY DETECTION ***
+        size_t current_queue_size = ledQueue.size();
+        size_t current_queue_pos = (ledQueue.getHead() + current_queue_size - 1) % 64;
+        
+        // Detect significant wraparounds only (reduced logging) 
+        if (last_queue_position > current_queue_pos && last_queue_position > 56) {
+            Serial.printf("🔄 MAJOR WRAPAROUND: %lu → %lu (size=%zu)\n", 
+                         last_queue_position, current_queue_pos, current_queue_size);
+        }
+        
+        // *** LED DATA PAIR TRACKING ***
+        // With new split approach: LED data comes in pairs (2), Apply commands are singles
+        // Normal queue progression: varies based on LED pairs + individual apply commands
+        static uint32_t last_check_time = 0;
+        static size_t last_check_size = 0;
+        
+        // Only check for stuck queues every few seconds to reduce noise
+        if (millis() - last_check_time > 3000) {
+            if (current_queue_size > 0 && last_check_size == current_queue_size) {
+                Serial.printf("⚠️ Queue unchanged at size %zu for >3sec\n", current_queue_size);
+            }
+            last_check_size = current_queue_size;
+            last_check_time = millis();
+        }
+        
+        last_queue_position = current_queue_pos;
+        
+        // Report bandwidth every 10 seconds (reduced frequency)
+        if (millis() - last_report_time > 10000) {
+            // Reset counters quietly
+            transfer_count = 0;
+            byte_count = 0;
+            last_report_time = millis();
+        }
+    }
+};
 
-// ===== USB CALLBACK COMPLETION HANDLING =====
+static USBBandwidthMonitor bandwidthMonitor;
+
+// *** UNIFIED LED STATE MANAGER ***
+class UnifiedLEDManager {
+private:
+    static const ControlPadColor BASE_COLORS[24];
+    ControlPadColor currentLEDState[24];
+    bool buttonStates[24] = {false};
+    bool stateChanged = true; // Start with true to initialize LEDs
+    uint32_t lastUpdateTime = 0;
+    uint32_t animationTime = 0;
+    uint8_t animationStep = 0;
+    uint8_t lastSentAnimationStep = 255; // Track what was last sent (255 = never sent)
+    bool animationEnabled = false;
+    
+public:
+    void setAnimationEnabled(bool enabled) {
+        animationEnabled = enabled;
+        stateChanged = true; // Force update when animation state changes
+    }
+    
+    bool isAnimationEnabled() const { return animationEnabled; }
+    
+    void setButtonState(uint8_t buttonIndex, bool pressed) {
+        if (buttonIndex < 24 && buttonStates[buttonIndex] != pressed) {
+            buttonStates[buttonIndex] = pressed;
+            stateChanged = true;
+        }
+    }
+    
+    void updateLEDState() {
+        if (!stateChanged) return;
+        
+        // Start with base colors
+        for (int i = 0; i < 24; i++) {
+            currentLEDState[i] = BASE_COLORS[i];
+        }
+        
+        // Apply animation if enabled
+        if (animationEnabled) {
+            // Cycle through buttons with white highlight every 100ms (smooth visual movement)
+            uint32_t currentTime = millis();
+            if (currentTime - animationTime >= 100) {
+                animationStep = (animationStep + 1) % 24;
+                animationTime = currentTime;
+            }
+            currentLEDState[animationStep] = {255, 255, 255}; // White animation highlight
+        }
+        
+        // Apply button highlights (override animation on pressed buttons)
+        for (int i = 0; i < 24; i++) {
+            if (buttonStates[i]) {
+                currentLEDState[i] = {255, 255, 255}; // White button highlight
+            }
+        }
+        
+        stateChanged = false;
+        lastSentAnimationStep = animationStep; // Track what we're about to send
+    }
+    
+    bool shouldSendUpdate() {
+        uint32_t currentTime = millis();
+        
+        // Always send if state changed due to button press/release
+        if (stateChanged) return true;
+        
+        // For animation: only send update when animation step actually changes
+        if (animationEnabled) {
+            // Update animation step if enough time has passed
+            if (currentTime - animationTime >= 100) {
+                uint8_t nextStep = (animationStep + 1) % 24;
+                if (nextStep != lastSentAnimationStep) {
+                    stateChanged = true; // Animation step changed, need to send update
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    const ControlPadColor* getLEDState() {
+        updateLEDState();
+        lastUpdateTime = millis();
+        return currentLEDState;
+    }
+};
+
+// Define the base rainbow colors
+const ControlPadColor UnifiedLEDManager::BASE_COLORS[24] = {
+    {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
+    {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
+    {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
+    {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
+    {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
+};
+
+// Global instance
+UnifiedLEDManager ledManager;
+
+// *** BUTTON DEBOUNCING: Track last button states and timing ***
+// static uint32_t lastButtonStates[24] = {0}; // Timestamp of last state change for each button - unused for now
+// static bool currentButtonStates[24] = {false}; // Current pressed state for each button - unused for now
+// static const uint32_t DEBOUNCE_DELAY_MS = 50; // 50ms debouncing - unused for now
+
+// ===== USB CALLBACK COMPLETION HANDLING WITH DETAILED DEBUGGING =====
 bool USBControlPad::hid_process_out_data(const Transfer_t *transfer) {
     // Called by USBHost_t36 when any output transfer completes
-    Serial.printf("📨 USB OUT transfer complete - status: 0x%08X\n", transfer->qtd.token);
+    
+    // *** DETAILED USB TRANSFER DEBUGGING ***
+    uint32_t token = transfer->qtd.token;
+    uint32_t status = token & 0xFF;
+    uint32_t pid = (token >> 8) & 3;
+    uint32_t length = (token >> 16) & 0x7FFF;
+    bool halted = (token & 0x40) != 0;
+    bool data_buffer_error = (token & 0x20) != 0;
+    bool babble = (token & 0x10) != 0;
+    bool transaction_error = (token & 0x08) != 0;
+    bool missed_microframe = (token & 0x04) != 0;
+    // bool split_transaction_state = (token & 0x02) != 0;  // Unused for now
+    // bool ping_state = (token & 0x01) != 0;              // Unused for now
+    
+    static uint32_t total_transfers = 0;
+    static uint32_t failed_transfers = 0;
+    static uint32_t last_failure_time = 0;
+    
+    total_transfers++;
+    
+    // Detailed failure analysis
+    if (status != 0 || halted || data_buffer_error || babble || transaction_error) {
+        failed_transfers++;
+        last_failure_time = millis();
+        
+        Serial.printf("❌ USB TRANSFER FAILED #%lu - Status: 0x%02X, Token: 0x%08X\n", 
+                     failed_transfers, status, token);
+        Serial.printf("   ⚠️ Errors: Halted:%d DBE:%d Babble:%d XactErr:%d MMF:%d\n", 
+                     halted, data_buffer_error, babble, transaction_error, missed_microframe);
+        Serial.printf("   📊 PID:%d, Length:%d, Time:%lu ms\n", pid, length, millis());
+        
+        // Decode specific error conditions
+        if (halted) Serial.println("   💥 HALTED: Endpoint is stalled");
+        if (data_buffer_error) Serial.println("   💥 DATA BUFFER ERROR: Data under/overrun");
+        if (babble) Serial.println("   💥 BABBLE: Device sent more data than expected");
+        if (transaction_error) Serial.println("   💥 TRANSACTION ERROR: CRC, timeout, etc.");
+        if (missed_microframe) Serial.println("   💥 MISSED MICROFRAME: High-speed timing issue");
+    }
+    
+    // Only report failures immediately, skip regular health reports
+    if (failed_transfers > 0 && millis() - last_failure_time < 500) {
+        // Keep failure reporting for critical issues
+    }
+    
+    // *** HARDWARE DEBUG: USB transfer completed ***
+    digitalWrite(DEBUG_PIN_USB_START, LOW);   // Clear transfer start pin
+    digitalWrite(DEBUG_PIN_USB_COMPLETE, HIGH);
+    delayMicroseconds(10);  // 10us pulse for scope trigger
+    digitalWrite(DEBUG_PIN_USB_COMPLETE, LOW);
     
     // *** CRITICAL: Notify queue that command completed and process next ***
     ledQueue.onCommandComplete();
@@ -188,10 +492,20 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
         return false;
     }
     
+    // *** HARDWARE DEBUG: USB transfer starting ***
+    initDebugPins();
+    digitalWrite(DEBUG_PIN_USB_START, HIGH);
+    
     // *** SEND COMMAND ***
-    Serial.printf("📤 sendCommand: Sending %zu bytes via USBHost_t36...\n", length);
+    
+    // Record bandwidth usage
+    bandwidthMonitor.recordTransfer(length);
     
     bool success = driver_->sendPacket(const_cast<uint8_t*>(data), length);
+    
+    if (!success) {
+        digitalWrite(DEBUG_PIN_USB_START, LOW);  // Clear if failed immediately
+    }
     
     // USBHost_t36 handles all timing and will call hid_process_out_data() when complete
     return success;
@@ -334,29 +648,23 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
     static uint32_t inputCount = 0;
     inputCount++;
     
-    Serial.printf("🔍 HID Process In Data #%lu: Length=%d\n", inputCount, transfer->length);
-    
-    // *** DIRECT BUTTON PROCESSING - NO QUEUE ***
-    // Process button data immediately in the USB callback
+    // *** FILTER: Only process and log actual button events ***
+    // Check if this is a button event before logging or processing
     if (transfer->length >= 7) {
         const uint8_t* buffer = (const uint8_t*)transfer->buffer;
         
+        // Only log and process if it's a button event (0x43 0x01)
         if (buffer[0] == 0x43 && buffer[1] == 0x01) {
+            Serial.printf("🔍 HID Process In Data #%lu: Length=%d (BUTTON EVENT)\n", inputCount, transfer->length);
             uint8_t buttonId = buffer[4];  // USB button ID (0-23)
             uint8_t state = buffer[5];     // Button state
             
             // Apply BUTTON MAPPING - Testing different mappings to find correct one
             if (buttonId < 24) {
-                // *** TEST ALL POSSIBLE MAPPINGS ***
-                uint8_t directMapping = buttonId;  // Direct mapping: USB Button ID → LED index
-                
-                // Column-major conversion (vertical to horizontal)
-                uint8_t col = buttonId / 5;  // Which column (0-4)
-                uint8_t row = buttonId % 5;  // Which row in that column (0-4) 
-                uint8_t columnMajorMapping = row * 5 + col;  // Convert to visual button position
-                
-                // Use the column-major mapping for now (based on user's description)
-                uint8_t ledIndex = columnMajorMapping;
+                            // Column-major conversion (vertical to horizontal)
+            uint8_t col = buttonId / 5;  // Which column (0-4)
+            uint8_t row = buttonId % 5;  // Which row in that column (0-4) 
+            uint8_t ledIndex = row * 5 + col;  // Convert to visual button position
                 
                 bool validEvent = false;
                 bool pressed = false;
@@ -370,76 +678,16 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
                 }
                 
                 if (validEvent) {
-                    // *** ALWAYS UPDATE BUTTON STATE FIRST (regardless of animation) ***
-                    extern ControlPadHardware* globalHardwareInstance;
-                    if (globalHardwareInstance && globalHardwareInstance->currentPad) {
-                        ControlPadEvent event;
-                        event.type = ControlPadEventType::Button;
-                        event.button.button = ledIndex;
-                        event.button.pressed = pressed;
-                        
-                        // This calls pushEvent which updates buttonState[ledIndex] = pressed
-                        globalHardwareInstance->currentPad->pushEvent(event);
-                        Serial.printf("📨 Button state updated: Button %d = %s\n", 
-                                     ledIndex + 1, pressed ? "PRESSED" : "RELEASED");
-                    }
+                    // *** SINGLE EVENT SYSTEM: Only update Unified LED Manager ***
+                    // This eliminates double event processing and duplicate LED updates
+                    ledManager.setButtonState(ledIndex, pressed);
                     
-                    // *** DIRECT LED HIGHLIGHTING - IMMEDIATE VISUAL FEEDBACK ***
-                    Serial.printf("🎮 Button %d %s (Direct USB callback)\n", 
-                                 ledIndex + 1, 
-                                 pressed ? "PRESSED" : "RELEASED");
-                    
-                    // *** MAPPING DEBUG: Show all possible mappings ***
-                    Serial.printf("🔍 USB_ID=%d → Direct=%d, ColumnMajor=%d → LED_index=%d (Button %d)\n", 
-                                 buttonId, directMapping, columnMajorMapping, ledIndex, ledIndex + 1);
-                    
-                    // *** CHECK IF ANIMATION IS ACTIVE - IF SO, SKIP DIRECT LED UPDATES ***
-                    bool animationActive = (globalHardwareInstance && globalHardwareInstance->isAnimationEnabled());
-                    
-                    if (animationActive) {
-                        // Animation is active - it will handle both animation AND button states
-                        // Button state already updated above, LED updates handled by animation
-                        Serial.printf("🎭 Animation active - button state updated, LED update handled by animation\n");
-                    } else {
-                        // Animation not active - use direct LED updates as before
-                        Serial.printf("🎯 Sending direct LED update with %s\n", pressed ? "WHITE highlight" : "original colors");
-                        
-                        // *** USE CORRECT RAINBOW COLORS FROM MAIN.CPP ***
-                        ControlPadColor correctRainbowColors[24] = {
-                            {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
-                            {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
-                            {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
-                            {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
-                            {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
-                        };
-                        
-                        // Create LED color array for the update
-                        ControlPadColor ledColors[24];
-                        
-                        // Copy the correct rainbow base colors
-                        for (int i = 0; i < 24; i++) {
-                            ledColors[i] = correctRainbowColors[i];
-                        }
-                        
-                        // Apply highlight: White when pressed, original color when released
-                        if (pressed) {
-                            ledColors[ledIndex] = {255, 255, 255}; // Bright white highlight
-                            Serial.printf("💡 Highlighting button %d in WHITE (LED index %d)\n", 
-                                         ledIndex + 1, ledIndex);
-                        } else {
-                            // Return to original rainbow color (already set above)
-                            Serial.printf("🎨 Returning button %d to original rainbow color\n", ledIndex + 1);
-                        }
-                        
-                        bool success = updateAllLEDs(ledColors, 24, true); // true = HIGH PRIORITY
-                        if (success) {
-                            Serial.printf("✅ LED commands queued with HIGH PRIORITY (queue size: %zu)\n", ledQueue.size());
-                        } else {
-                            Serial.printf("⚠️ HIGH PRIORITY LED command queuing failed\n");
-                        }
-                    }
+                    Serial.printf("🎮 Button %d %s\n", ledIndex + 1, pressed ? "PRESSED" : "RELEASED");
                 }
             }
+        } else {
+            // Not a button event - ignore silently (no logging to reduce spam)
+            return true;
         }
     }
     
@@ -467,12 +715,8 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
     }
     
     const char* priorityStr = priority ? "HIGH PRIORITY" : "normal";
-    Serial.printf("🔧 updateAllLEDs: Starting QUEUED LED update for %zu colors (%s)\n", count, priorityStr);
     
-    // *** PROPER PRIORITY HANDLING: For button events, insert entire sequence at front ***
-    if (priority) {
-        Serial.println("🚀 HIGH PRIORITY: Inserting complete LED sequence at front of queue");
-    }
+    // *** ALL 4 PACKETS REQUIRED: Both apply commands are essential for LEDs to work ***
     
     // *** CORRECT LED COMMAND SEQUENCE FROM USER DOCUMENTATION ***
     
@@ -536,27 +780,26 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
     
     // *** PACKAGE 2: DIRECT ASSIGNMENTS FOR MAXIMUM PERFORMANCE ***
     // Complete LED 17 (green, blue channels from Package 1)
-    package2[4] = 0x00;          // padding
-    package2[5] = colors[17].g;  // LED 17 green
-    package2[6] = colors[17].b;  // LED 17 blue
+    package2[4] = colors[17].g;  // LED 17 green
+    package2[5] = colors[17].b;  // LED 17 blue
     
     // LED 22 
-    package2[7] = colors[22].r;  package2[8] = colors[22].g;  package2[9] = colors[22].b;   // LED 22
+    package2[6] = colors[22].r;  package2[7] = colors[22].g;  package2[8] = colors[22].b;   // LED 22
     
     // Column 4: LED indices 3, 8, 13, 18, 23
-    package2[10] = colors[3].r;  package2[11] = colors[3].g;  package2[12] = colors[3].b;   // LED 3
-    package2[13] = colors[8].r;  package2[14] = colors[8].g;  package2[15] = colors[8].b;   // LED 8
-    package2[16] = colors[13].r; package2[17] = colors[13].g; package2[18] = colors[13].b;  // LED 13
-    package2[19] = colors[18].r; package2[20] = colors[18].g; package2[21] = colors[18].b;  // LED 18
-    package2[22] = colors[23].r; package2[23] = colors[23].g; package2[24] = colors[23].b;  // LED 23
+    package2[9] = colors[3].r;   package2[10] = colors[3].g;  package2[11] = colors[3].b;   // LED 3
+    package2[12] = colors[8].r;  package2[13] = colors[8].g;  package2[14] = colors[8].b;   // LED 8
+    package2[15] = colors[13].r; package2[16] = colors[13].g; package2[17] = colors[13].b;  // LED 13
+    package2[18] = colors[18].r; package2[19] = colors[18].g; package2[20] = colors[18].b;  // LED 18
+    package2[21] = colors[23].r; package2[22] = colors[23].g; package2[23] = colors[23].b;  // LED 23
     
     // Column 5: LED indices 4, 9, 14, 19 (only 4 LEDs - there is no LED 24)
-    package2[25] = colors[4].r;  package2[26] = colors[4].g;  package2[27] = colors[4].b;   // LED 4
-    package2[28] = colors[9].r;  package2[29] = colors[9].g;  package2[30] = colors[9].b;   // LED 9
-    package2[31] = colors[14].r; package2[32] = colors[14].g; package2[33] = colors[14].b;  // LED 14
-    package2[34] = colors[19].r; package2[35] = colors[19].g; package2[36] = colors[19].b;  // LED 19
+    package2[24] = colors[4].r;  package2[25] = colors[4].g;  package2[26] = colors[4].b;   // LED 4
+    package2[27] = colors[9].r;  package2[28] = colors[9].g;  package2[29] = colors[9].b;   // LED 9
+    package2[30] = colors[14].r; package2[31] = colors[14].g; package2[32] = colors[14].b;  // LED 14
+    package2[33] = colors[19].r; package2[34] = colors[19].g; package2[35] = colors[19].b;  // LED 19
     
-    // *** PACKAGE2 BYTES 37-63 AUTO-FILLED WITH 0x00 BY INITIALIZATION ***
+    // *** PACKAGE2 BYTES 36-63 AUTO-FILLED WITH 0x00 BY INITIALIZATION ***
     // uint8_t package2[64] = {0} ensures all 64 bytes are zero-filled
     
     // COMMAND 4: Apply command (0x41 0x80)
@@ -570,82 +813,30 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
     apply2[1] = 0x28;
     apply2[4] = 0xFF; // Brightness
     
-    // *** CRITICAL FIX: For priority commands, insert in REVERSE order so they execute correctly ***
-    bool success1, success2, success3, success4;
+    // *** SPLIT ATOMIC ENQUEUING: LED data (2 packets) + Both apply commands (2 singles) ***
+    bool ledSuccess = ledQueue.enqueueLEDData(package1, package2, priority);
+    bool applySuccess1 = false, applySuccess2 = false;
     
-    // *** DEBUG: Show package data and verify 64-byte size ***
-    Serial.printf("🔍 Package1 LED data (bytes 24-35): ");
-    for (int i = 24; i < 36 && i < 64; i++) {
-        Serial.printf("%02X ", package1[i]);
+    if (ledSuccess) {
+        // Send both apply commands - both are essential for LEDs to work
+        applySuccess1 = ledQueue.enqueueSingle(apply1, 3, priority);
+        applySuccess2 = ledQueue.enqueueSingle(apply2, 4, priority);
     }
-    Serial.println();
     
-    Serial.printf("🔍 Package2 LED data (bytes 4-15): ");
-    for (int i = 4; i < 16 && i < 64; i++) {
-        Serial.printf("%02X ", package2[i]);
-    }
-    Serial.println();
+    bool success = ledSuccess && applySuccess1 && applySuccess2;
     
-    // *** VALIDATE 64-BYTE PACKET SIZES ***
-    Serial.printf("📏 Packet sizes: Package1=%d, Package2=%d, Apply1=%d, Apply2=%d bytes\n", 
-                 (int)sizeof(package1), (int)sizeof(package2), (int)sizeof(apply1), (int)sizeof(apply2));
-    
-    if (priority) {
-        // *** BATCH INSERTION: Stop processing during insertion to prevent immediate execution ***
-        bool wasProcessing = ledQueue.isProcessing();
-        ledQueue.forceStopProcessing();
-        
-        Serial.println("🚀 Inserting HIGH PRIORITY commands in REVERSE order for correct execution:");
-        // Insert in reverse order: Apply2 → Apply1 → Package2 → Package1
-        // They will execute as: Package1 → Package2 → Apply1 → Apply2 (correct!)
-        
-        Serial.printf("📦 Apply2: CMD=0x%02X 0x%02X (Final apply) - %s\n", apply2[0], apply2[1], priorityStr);
-        success4 = ledQueue.enqueue(apply2, 64, 4, priority);
-        
-        Serial.printf("📦 Apply1: CMD=0x%02X 0x%02X (Apply command) - %s\n", apply1[0], apply1[1], priorityStr);
-        success3 = ledQueue.enqueue(apply1, 64, 3, priority);
-        
-        Serial.printf("📦 Package2: CMD=0x%02X 0x%02X 0x%02X (Package 2 of 2) - %s\n", 
-                     package2[0], package2[1], package2[2], priorityStr);
-        success2 = ledQueue.enqueue(package2, 64, 2, priority);
-        
-        Serial.printf("📦 Package1: CMD=0x%02X 0x%02X (Package 1 of 2) - %s\n", 
-                     package1[0], package1[1], priorityStr);
-        success1 = ledQueue.enqueue(package1, 64, 1, priority);
-        
-        Serial.println("🎯 HIGH PRIORITY sequence inserted - will execute: Package1→Package2→Apply1→Apply2");
-        
-        // *** RESUME PROCESSING: All 4 commands are now queued, start processing ***
-        if (!wasProcessing) {
-            ledQueue.resumeProcessing();
+    // Only log failures and high-priority events to reduce serial overhead
+    if (!success) {
+        if (!ledSuccess) {
+            Serial.printf("❌ LED data FAILED - queue full (%s)\n", priorityStr);
+        } else {
+            Serial.printf("❌ Apply commands FAILED (%s)\n", priorityStr);
         }
-    } else {
-        // Normal order for regular updates
-        Serial.printf("📦 Package1: CMD=0x%02X 0x%02X (Package 1 of 2) - %s\n", 
-                     package1[0], package1[1], priorityStr);
-        success1 = ledQueue.enqueue(package1, 64, 1, priority);
-        
-        Serial.printf("📦 Package2: CMD=0x%02X 0x%02X 0x%02X (Package 2 of 2) - %s\n", 
-                     package2[0], package2[1], package2[2], priorityStr);
-        success2 = ledQueue.enqueue(package2, 64, 2, priority);
-        
-        Serial.printf("📦 Apply1: CMD=0x%02X 0x%02X (Apply command) - %s\n", 
-                     apply1[0], apply1[1], priorityStr);
-        success3 = ledQueue.enqueue(apply1, 64, 3, priority);
-        
-        Serial.printf("📦 Apply2: CMD=0x%02X 0x%02X (Final apply) - %s\n", 
-                     apply2[0], apply2[1], priorityStr);
-        success4 = ledQueue.enqueue(apply2, 64, 4, priority);
+    } else if (priority) {
+        Serial.printf("🚀 HIGH PRIORITY sequence (4 packets) enqueued (%s)\n", priorityStr);
     }
     
-    Serial.printf("📤 Package1 queued: %s\n", success1 ? "SUCCESS" : "FAILED");
-    Serial.printf("📤 Package2 queued: %s\n", success2 ? "SUCCESS" : "FAILED");
-    Serial.printf("📤 Apply1 queued: %s\n", success3 ? "SUCCESS" : "FAILED");
-    Serial.printf("📤 Apply2 queued: %s\n", success4 ? "SUCCESS" : "FAILED");
-    
-    bool overall = success1 && success2 && success3 && success4;
-    Serial.printf("🎯 updateAllLEDs QUEUED sequence result: %s (queue size: %zu, %s)\n", 
-                  overall ? "SUCCESS" : "FAILED", ledQueue.size(), priorityStr);
+    bool overall = success;
     return overall;
 }
 
@@ -691,45 +882,41 @@ bool USBControlPad::setCustomMode() {
 
 bool USBControlPad::sendActivationSequence() {
     // Based on the original working activation sequence
-    Serial.printf("🚀 sendActivationSequence: Starting device activation...\n");
     bool success = true;
     
     // Step 1: 0x42 00 activation
     uint8_t cmd1[64] = {0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01};
-    Serial.printf("🚀 Step 1: 0x%02X 0x%02X activation\n", cmd1[0], cmd1[1]);
     bool step1 = sendCommand(cmd1, 64);
     success &= step1;
     if (step1) delay(100); // Allow device to process
     
     // Step 2: 0x42 10 variant  
     uint8_t cmd2[64] = {0x42, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01};
-    Serial.printf("🚀 Step 2: 0x%02X 0x%02X variant\n", cmd2[0], cmd2[1]);
     bool step2 = sendCommand(cmd2, 64);
     success &= step2;
     if (step2) delay(100); // Allow device to process
     
     // Step 3: 0x43 00 button activation
     uint8_t cmd3[64] = {0x43, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
-    Serial.printf("🚀 Step 3: 0x%02X 0x%02X button activation\n", cmd3[0], cmd3[1]);
     bool step3 = sendCommand(cmd3, 64);
     success &= step3;
     if (step3) delay(100); // Allow device to process
     
     // Step 4: 0x41 80 status
     uint8_t cmd4[64] = {0x41, 0x80, 0x00, 0x00};
-    Serial.printf("🚀 Step 4: 0x%02X 0x%02X status\n", cmd4[0], cmd4[1]);
     bool step4 = sendCommand(cmd4, 64);
     success &= step4;
     if (step4) delay(100); // Allow device to process
     
     // Step 5: 0x52 00 activate effect modes
     uint8_t cmd5[64] = {0x52, 0x00, 0x00, 0x00};
-    Serial.printf("🚀 Step 5: 0x%02X 0x%02X effect modes\n", cmd5[0], cmd5[1]);
     bool step5 = sendCommand(cmd5, 64);
     success &= step5;
     if (step5) delay(100); // Allow device to process
     
-    Serial.printf("🚀 sendActivationSequence overall result: %s\n", success ? "SUCCESS" : "FAILED");
+    if (!success) {
+        Serial.println("⚠️ Activation sequence failed");
+    }
     return success;
 }
 
@@ -818,95 +1005,36 @@ bool ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count)
     return globalControlPadDriver.updateAllLEDs(colors, count);
 }
 
-// *** ANIMATION SYSTEM: Cycles through buttons with white highlighting ***
-class ButtonAnimation {
-private:
-    static const uint32_t ANIMATION_DELAY_MS = 200; // 200ms per button to reduce conflicts
-    uint32_t lastUpdateTime = 0;
-    uint8_t currentButton = 0;
-    bool animationEnabled = false; // Start disabled
-    
-    // Base rainbow colors (same as main.cpp)
-    ControlPadColor baseColors[24] = {
-        {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
-        {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
-        {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
-        {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
-        {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
-    };
-
-public:
-    void update() {
-        if (!animationEnabled) return;
-        
-        uint32_t currentTime = millis();
-        if (currentTime - lastUpdateTime >= ANIMATION_DELAY_MS) {
-            // Get the current ControlPad instance to check button states
-            extern ControlPadHardware* globalHardwareInstance;
-            ControlPad* currentPad = globalHardwareInstance ? globalHardwareInstance->currentPad : nullptr;
-            
-            // Create LED array with rainbow base colors + current button states
-            ControlPadColor ledColors[24];
-            for (int i = 0; i < 24; i++) {
-                // Check if this button is currently pressed
-                bool isPressed = (currentPad && currentPad->getButtonState(i));
-                
-                if (isPressed) {
-                    // Use white for pressed buttons
-                    ledColors[i] = {255, 255, 255};
-                } else {
-                    // Use rainbow for unpressed buttons
-                    ledColors[i] = baseColors[i];
-                }
-            }
-            
-            // Apply animation highlight (white) - this will show on unpressed buttons
-            // For pressed buttons, they're already white so animation highlight is invisible
-            ledColors[currentButton] = {255, 255, 255};
-            
-            // Send to hardware - when animation is active, it's the ONLY LED updater
-            bool success = globalControlPadDriver.updateAllLEDs(ledColors, 24, false);
-            if (success) {
-                Serial.printf("🎭 Animation: Button %d highlighted\n", currentButton + 1);
-            } else {
-                Serial.println("⚠️ Animation frame failed to queue");
-            }
-            
-            // Move to next button
-            currentButton = (currentButton + 1) % 24;
-            lastUpdateTime = currentTime;
-        }
-    }
-    
-    void enable() { 
-        animationEnabled = true; 
-        Serial.println("🎭 Button animation ENABLED - cycling through all buttons");
-    }
-    
-    void disable() { 
-        animationEnabled = false; 
-        Serial.println("🎭 Button animation DISABLED");
-    }
-    
-    bool isEnabled() const { return animationEnabled; }
-    uint8_t getCurrentButton() const { return currentButton; }
-};
-
-static ButtonAnimation buttonAnimation;
+// *** DUPLICATE CLASS DEFINITION REMOVED - NOW DEFINED EARLIER IN FILE ***
 
 // *** PUBLIC ANIMATION CONTROL ***
 void ControlPadHardware::enableAnimation() {
-    buttonAnimation.enable();
+    ledManager.setAnimationEnabled(true);
 }
 
 void ControlPadHardware::disableAnimation() {
-    buttonAnimation.disable();
+    ledManager.setAnimationEnabled(false);
 }
 
 void ControlPadHardware::updateAnimation() {
-    buttonAnimation.update();
+    // This method is now empty as the animation logic is handled by ledManager
+}
+
+void ControlPadHardware::updateButtonHighlights() {
+    // This method is now empty as the animation logic is handled by ledManager
+}
+
+void ControlPadHardware::updateUnifiedLEDs() {
+    // Check if we need to send an LED update
+    if (ledManager.shouldSendUpdate()) {
+        const ControlPadColor* ledState = ledManager.getLEDState();
+        bool success = globalControlPadDriver.updateAllLEDs(ledState, 24, false); // NORMAL PRIORITY
+        if (!success) {
+            Serial.println("⚠️ Unified LED update failed to queue");
+        }
+    }
 }
 
 bool ControlPadHardware::isAnimationEnabled() const {
-    return buttonAnimation.isEnabled();
+    return ledManager.isAnimationEnabled();
 }

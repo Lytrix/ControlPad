@@ -72,6 +72,8 @@ public:
     void enableAnimation();
     void disableAnimation();
     void updateAnimation();
+    void updateButtonHighlights();
+    void updateUnifiedLEDs();
     bool isAnimationEnabled() const;
 
     // Event API
