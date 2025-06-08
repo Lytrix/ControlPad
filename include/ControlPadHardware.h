@@ -232,6 +232,7 @@ public:
     
     // LED control commands
     bool sendCommand(const uint8_t* data, size_t length);
+    bool sendDirectUSB(const uint8_t* data, size_t length);  // Direct USB bypass for MIDI timing
     bool sendLEDCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2);
     bool sendCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2);
     void setFastMode(bool enabled);    // Enable/disable fast mode for rapid updates
@@ -290,6 +291,10 @@ public:
     void updateButtonHighlights();
     void updateUnifiedLEDs();
     bool isAnimationEnabled() const;
+    
+    // MIDI-timed LED system support
+    bool isConnected() const;
+    bool sendRawPacket(const uint8_t* data, size_t length);
 
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
     ControlPad* currentPad = nullptr;

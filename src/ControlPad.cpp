@@ -516,3 +516,31 @@ bool ControlPad::isAnimationEnabled() const {
     return false;
 }
 
+// *** MIDI-TIMED LED SYSTEM SUPPORT METHODS ***
+ControlPadColor ControlPad::getCurrentLedColor(uint8_t index) const {
+    if (index < CONTROLPAD_NUM_BUTTONS) {
+        // Return the current color state (including highlights)
+        ControlPadColor color = currentColors[index];
+        // Debug: Only log occasionally to avoid spam
+        if (index == 0) {
+            Serial.printf("🔍 getCurrentLedColor[%d]: RGB(%d,%d,%d)\n", index, color.r, color.g, color.b);
+        }
+        return color;
+    }
+    return {0, 0, 0};  // Default to off if invalid index
+}
+
+bool ControlPad::isConnected() const {
+    if (hw) {
+        return hw->isConnected();
+    }
+    return false;
+}
+
+bool ControlPad::sendRawPacket(const uint8_t* data, size_t length) {
+    if (hw) {
+        return hw->sendRawPacket(data, length);
+    }
+    return false;
+}
+

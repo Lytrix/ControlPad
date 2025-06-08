@@ -45,7 +45,12 @@ public:
     
     // *** NEW: USB cleanup protection for LED coordination ***
     bool isUSBCleanupActive();
-    void activateUSBCleanupProtection(const char* reason);
+    void activateUSBCleanupProtection(const char* reason, uint32_t duration = 100);
+    
+    // *** NEW: LED Controller Hardware Recovery System ***
+    void validateAndRecoverLEDController();
+    bool testLEDControllerResponse();
+    bool recoverLEDController();
 
 private:
 };

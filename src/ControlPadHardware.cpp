@@ -274,6 +274,14 @@ public:
         // *** CRITICAL: Only process if not already processing and queue has items ***
         if (processing || atomicReadCount() == 0) return;
         
+        // *** USB CLEANUP PROTECTION CHECK - FIRST PRIORITY ***
+        extern USBSynchronizedPacketController usbSyncController;
+        if (usbSyncController.isUSBCleanupActive()) {
+            // Skip processing during USB cleanup to prevent flickering
+            Serial.println("🛡️ processNext SKIPPED - USB cleanup protection active");
+            return;
+        }
+        
         // *** USB CYCLE TIMING CHECK ***
         // Only send packets during appropriate timing windows
         if (!usbSyncController.isSafeToSendPacket()) {
@@ -306,6 +314,15 @@ public:
     void onCommandComplete() {
         // *** Called from USB callback when command completes ***
         processing = false;
+        
+        // *** USB CLEANUP PROTECTION CHECK ***
+        extern USBSynchronizedPacketController usbSyncController;
+        if (usbSyncController.isUSBCleanupActive()) {
+            // Don't process next command during USB cleanup to prevent flickering
+            Serial.println("🛡️ onCommandComplete SKIPPED - USB cleanup protection active");
+            return;
+        }
+        
         processNext(); // Process next command in queue
     }
     
@@ -481,33 +498,34 @@ public:
     
     void setButtonState(uint8_t buttonIndex, bool pressed) {
         if (buttonIndex < 24 && buttonStates[buttonIndex] != pressed) {
-            buttonStates[buttonIndex] = pressed;
+            // *** COMMENT OUT LED STATE CHANGE FOR CLEAN DATA COLLECTION ***
+            // buttonStates[buttonIndex] = pressed;
             
-            // *** DEBUG: Track button release events specifically ***
+            // *** DEBUG: Track button events for data collection ***
             if (!pressed) {
-                Serial.printf("🔴 BUTTON RELEASE: Button %u released - will restore base color\n", buttonIndex);
+                Serial.printf("🔴 BUTTON RELEASE: Button %u\n", buttonIndex);
             } else {
-                Serial.printf("🟢 BUTTON PRESS: Button %u pressed - will highlight white\n", buttonIndex);
+                Serial.printf("🟢 BUTTON PRESS: Button %u\n", buttonIndex);
             }
             
-            // *** BUTTON BATCHING LOGIC ***
-            uint32_t now = millis();
-            
-            if (!buttonStateChanged) {
-                // First button change in a potential batch
-                firstButtonChangeTime = now;
-                buttonStateChanged = true;
-                buttonChangesInBatch = 1;
-                Serial.printf("🎮 Button batch started: Button %u %s\n", 
-                             buttonIndex, pressed ? "pressed" : "released");
-            } else {
-                // Additional button change - extend batch
-                buttonChangesInBatch++;
-                Serial.printf("🎮 Button batch +%u: Button %u %s (total: %u changes)\n", 
-                             buttonChangesInBatch, buttonIndex, pressed ? "pressed" : "released", buttonChangesInBatch);
-            }
-            
-            lastButtonChangeTime = now;
+            // *** COMMENT OUT BUTTON BATCHING LOGIC - NO LED UPDATES ***
+            // uint32_t now = millis();
+            // 
+            // if (!buttonStateChanged) {
+            //     // First button change in a potential batch
+            //     firstButtonChangeTime = now;
+            //     buttonStateChanged = true;
+            //     buttonChangesInBatch = 1;
+            //     Serial.printf("🎮 Button batch started: Button %u %s\n", 
+            //                  buttonIndex, pressed ? "pressed" : "released");
+            // } else {
+            //     // Additional button change - extend batch
+            //     buttonChangesInBatch++;
+            //     Serial.printf("🎮 Button batch +%u: Button %u %s (total: %u changes)\n", 
+            //                  buttonChangesInBatch, buttonIndex, pressed ? "pressed" : "released", buttonChangesInBatch);
+            // }
+            // 
+            // lastButtonChangeTime = now;
         }
     }
     
@@ -535,12 +553,13 @@ public:
             newLEDState[animationStep] = {255, 255, 255}; // White animation highlight
         }
         
+        // *** COMMENT OUT BUTTON HIGHLIGHTS FOR CLEAN DATA COLLECTION ***
         // Apply button highlights (override animation on pressed buttons)
-        for (int i = 0; i < 24; i++) {
-            if (buttonStates[i]) {
-                newLEDState[i] = {255, 255, 255}; // White button highlight
-            }
-        }
+        // for (int i = 0; i < 24; i++) {
+        //     if (buttonStates[i]) {
+        //         newLEDState[i] = {255, 255, 255}; // White button highlight
+        //     }
+        // }
         
         // **ATOMIC COMMIT** - Only update currentLEDState after complete calculation
         for (int i = 0; i < 24; i++) {
@@ -565,29 +584,29 @@ public:
             return false;  // Block ALL LED updates during coordination period
         }
         
-        // *** BUTTON BATCHING: Check if we should send batched button updates ***
-        if (buttonStateChanged) {
-            uint32_t timeSinceFirstChange = currentTime - firstButtonChangeTime;
-            uint32_t timeSinceLastChange = currentTime - lastButtonChangeTime;
-            
-            // Send batched update if:
-            // 1. No new button changes for BUTTON_BATCH_TIMEOUT_MS (20ms quiet period)
-            // 2. OR we've been collecting for MAX_BUTTON_BATCH_DELAY_MS (50ms max delay)
-            if (timeSinceLastChange >= BUTTON_BATCH_TIMEOUT_MS || 
-                timeSinceFirstChange >= MAX_BUTTON_BATCH_DELAY_MS) {
-                
-                Serial.printf("🎮 Sending button batch: %u changes over %lums (quiet for %lums)\n",
-                             buttonChangesInBatch, timeSinceFirstChange, timeSinceLastChange);
-                             
-                // Reset batching state and trigger LED update
-                buttonStateChanged = false;
-                buttonChangesInBatch = 0;
-                stateChanged = true;
-                return true;
-            }
-            // Still collecting button changes, don't send yet
-            return false;
-        }
+        // *** COMMENT OUT BUTTON BATCHING FOR CLEAN DATA COLLECTION ***
+        // if (buttonStateChanged) {
+        //     uint32_t timeSinceFirstChange = currentTime - firstButtonChangeTime;
+        //     uint32_t timeSinceLastChange = currentTime - lastButtonChangeTime;
+        //     
+        //     // Send batched update if:
+        //     // 1. No new button changes for BUTTON_BATCH_TIMEOUT_MS (20ms quiet period)
+        //     // 2. OR we've been collecting for MAX_BUTTON_BATCH_DELAY_MS (50ms max delay)
+        //     if (timeSinceLastChange >= BUTTON_BATCH_TIMEOUT_MS || 
+        //         timeSinceFirstChange >= MAX_BUTTON_BATCH_DELAY_MS) {
+        //         
+        //         Serial.printf("🎮 Sending button batch: %u changes over %lums (quiet for %lums)\n",
+        //                      buttonChangesInBatch, timeSinceFirstChange, timeSinceLastChange);
+        //                      
+        //         // Reset batching state and trigger LED update
+        //         buttonStateChanged = false;
+        //         buttonChangesInBatch = 0;
+        //         stateChanged = true;
+        //         return true;
+        //     }
+        //     // Still collecting button changes, don't send yet
+        //     return false;
+        // }
         
         // Regular animation updates (if no button batching in progress)
         if (stateChanged) return true;
@@ -615,15 +634,6 @@ public:
         lastUpdateTime = millis();
         return currentLEDState;
     }
-};
-
-// Define the base rainbow colors
-const ControlPadColor UnifiedLEDManager::BASE_COLORS[24] = {
-    {255, 0, 0},     {255, 127, 0},   {255, 255, 0},   {0, 255, 0},     {0, 0, 255},      // Row 1
-    {127, 0, 255},   {255, 0, 127},   {255, 255, 255}, {127, 127, 127}, {255, 64, 0},     // Row 2  
-    {0, 255, 127},   {127, 255, 0},   {255, 127, 127}, {127, 127, 255}, {255, 255, 127},  // Row 3
-    {0, 127, 255},   {255, 0, 255},   {127, 255, 255}, {255, 127, 0},   {127, 0, 127},    // Row 4
-    {64, 64, 64},    {128, 128, 128}, {192, 192, 192}, {255, 255, 255}                    // Row 5
 };
 
 // Global instance
@@ -704,24 +714,29 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
         Serial.printf("❌ sendCommand failed: device=%p, driver=%p\n", mydevice, driver_);
         return false;
     }
-    
-    // *** HARDWARE DEBUG: USB transfer starting ***
-    initDebugPins();
-    digitalWrite(DEBUG_PIN_USB_START, HIGH);
-    
-    // *** SEND COMMAND ***
-    
-    // Record bandwidth usage
-    bandwidthMonitor.recordTransfer(length);
-    
+        // *** SEND COMMAND ***
     bool success = driver_->sendPacket(const_cast<uint8_t*>(data), length);
     
     if (!success) {
-        digitalWrite(DEBUG_PIN_USB_START, LOW);  // Clear if failed immediately
+    //    digitalWrite(DEBUG_PIN_USB_START, LOW);  // Clear if failed immediately
     }
     
     // USBHost_t36 handles all timing and will call hid_process_out_data() when complete
     return success;
+}
+
+// Direct USB send that bypasses all monitoring and queue logic for MIDI timing
+bool USBControlPad::sendDirectUSB(const uint8_t* data, size_t length) {
+    if (!initialized || length > 64) {
+        return false;
+    }
+    
+    if (!mydevice || !driver_) {
+        return false;
+    }
+    delayMicroseconds(1500);
+    // Send directly through the HID driver, bypassing all monitoring
+    return driver_->sendPacket(const_cast<uint8_t*>(data), length);
 }
 
 // ===== USB DRIVER IMPLEMENTATION =====
@@ -891,8 +906,8 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
                 }
                 
                 if (validEvent) {
-                    // *** NOTIFY COORDINATION SYSTEM ***
-                    usbSyncController.notifyButtonActivity();
+                    // *** COMMENT OUT COORDINATION FOR CLEAN DATA COLLECTION ***
+                    // usbSyncController.notifyButtonActivity();
                     
                     // *** SINGLE EVENT SYSTEM: Only update Unified LED Manager ***
                     // This eliminates double event processing and duplicate LED updates
@@ -925,6 +940,15 @@ bool USBControlPad::begin(DMAQueue<controlpad_event, 16> *q) {
 }
 
 bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority) {
+    // *** USB CLEANUP PROTECTION CHECK - FIRST PRIORITY ***
+    extern USBSynchronizedPacketController usbSyncController;
+    if (usbSyncController.isUSBCleanupActive()) {
+        // Skip LED update during USB cleanup to prevent flickering
+        const char* priorityStr = priority ? "HIGH PRIORITY" : "normal";
+        Serial.printf("🛡️ updateAllLEDs SKIPPED - USB cleanup protection active (%s)\n", priorityStr);
+        return false;  // Return false to indicate update was skipped
+    }
+    
     if (!initialized || count > 24) {
         Serial.printf("❌ updateAllLEDs failed: initialized=%d, count=%zu\n", initialized, count);
         return false;
@@ -1216,6 +1240,14 @@ void ControlPadHardware::poll() {
 }
 
 bool ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count) {
+    // *** USB CLEANUP PROTECTION CHECK ***
+    extern USBSynchronizedPacketController usbSyncController;
+    if (usbSyncController.isUSBCleanupActive()) {
+        // Skip LED update during USB cleanup to prevent flickering
+        Serial.println("🛡️ setAllLeds SKIPPED - USB cleanup protection active");
+        return false;  // Return false to indicate update was skipped
+    }
+    
     // *** NON-BLOCKING LED UPDATE FOR MIDI TIMING ***
     // Simple, fast LED update using USBHost_t36's built-in capabilities
     return globalControlPadDriver.updateAllLEDs(colors, count);
@@ -1260,4 +1292,20 @@ void ControlPadHardware::updateUnifiedLEDs() {
 
 bool ControlPadHardware::isAnimationEnabled() const {
     return ledManager.isAnimationEnabled();
+}
+
+// *** MIDI-TIMED LED SYSTEM SUPPORT METHODS ***
+bool ControlPadHardware::isConnected() const {
+    // Check if the USB device is connected and ready
+    return globalControlPadDriver.device_ != nullptr;
+}
+
+bool ControlPadHardware::sendRawPacket(const uint8_t* data, size_t length) {
+    // Send raw packet directly through the USB driver
+    if (!globalControlPadDriver.device_) {
+        return false;  // Device not connected
+    }
+    
+    // Use the existing sendCommand method which handles the USB transfer
+    return globalControlPadDriver.sendCommand(data, length);
 }
