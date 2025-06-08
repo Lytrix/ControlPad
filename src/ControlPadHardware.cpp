@@ -1,4 +1,6 @@
 #include "ControlPadHardware.h"
+#include "USBSynchronizedPacketController.h"
+#include <algorithm>  // For std::min, std::max
 #include <USBHost_t36.h>  // For testing with standard drivers
 
 // Global hardware instance for access from USB callbacks
@@ -272,13 +274,24 @@ public:
         // *** CRITICAL: Only process if not already processing and queue has items ***
         if (processing || atomicReadCount() == 0) return;
         
+        // *** USB CYCLE TIMING CHECK ***
+        // Only send packets during appropriate timing windows
+        if (!usbSyncController.isSafeToSendPacket()) {
+            // Wait for appropriate timing window
+            return;
+        }
+        
         processing = true;
         QueuedLEDCommand cmd;
         if (dequeue(cmd)) {
             // *** ACTUALLY SEND THE COMMAND via USBHost_t36 ***
-            
             bool success = globalControlPadDriver.sendCommand(cmd.data, cmd.length);
-            if (!success) {
+            
+            if (success) {
+                // Notify USB activity monitor after successful send
+                USBSynchronizedPacketController::staticInstance.recordPacketSent();
+                
+            } else {
                 // If send failed, allow processing to continue immediately
                 processing = false;
                 Serial.printf("❌ LED command type %d FAILED - retrying next in queue\n", cmd.commandType);
@@ -470,6 +483,13 @@ public:
         if (buttonIndex < 24 && buttonStates[buttonIndex] != pressed) {
             buttonStates[buttonIndex] = pressed;
             
+            // *** DEBUG: Track button release events specifically ***
+            if (!pressed) {
+                Serial.printf("🔴 BUTTON RELEASE: Button %u released - will restore base color\n", buttonIndex);
+            } else {
+                Serial.printf("🟢 BUTTON PRESS: Button %u pressed - will highlight white\n", buttonIndex);
+            }
+            
             // *** BUTTON BATCHING LOGIC ***
             uint32_t now = millis();
             
@@ -494,9 +514,12 @@ public:
     void updateLEDState() {
         if (!stateChanged) return;
         
+        // **ATOMIC LED STATE UPDATE** - Build complete state without intermediate resets
+        ControlPadColor newLEDState[24];
+        
         // Start with base colors
         for (int i = 0; i < 24; i++) {
-            currentLEDState[i] = BASE_COLORS[i];
+            newLEDState[i] = BASE_COLORS[i];
         }
         
         // Apply animation if enabled
@@ -509,14 +532,19 @@ public:
                 animationStep = (animationStep + 1) % 24;
                 animationTime = currentTime;
             }
-            currentLEDState[animationStep] = {255, 255, 255}; // White animation highlight
+            newLEDState[animationStep] = {255, 255, 255}; // White animation highlight
         }
         
         // Apply button highlights (override animation on pressed buttons)
         for (int i = 0; i < 24; i++) {
             if (buttonStates[i]) {
-                currentLEDState[i] = {255, 255, 255}; // White button highlight
+                newLEDState[i] = {255, 255, 255}; // White button highlight
             }
+        }
+        
+        // **ATOMIC COMMIT** - Only update currentLEDState after complete calculation
+        for (int i = 0; i < 24; i++) {
+            currentLEDState[i] = newLEDState[i];
         }
         
         stateChanged = false;
@@ -525,6 +553,17 @@ public:
     
     bool shouldSendUpdate() {
         uint32_t currentTime = millis();
+        
+        // *** COORDINATION CHECK: Don't send ANY updates during button quiet period ***
+        if (!usbSyncController.isSafeToSendPacket()) {
+            // DEBUG: Show what type of update is being blocked
+            if (buttonStateChanged) {
+                Serial.println("🚫 BLOCKED: Button update during quiet period");
+            } else if (stateChanged) {
+                Serial.println("🚫 BLOCKED: Animation update during quiet period");
+            }
+            return false;  // Block ALL LED updates during coordination period
+        }
         
         // *** BUTTON BATCHING: Check if we should send batched button updates ***
         if (buttonStateChanged) {
@@ -852,6 +891,9 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
                 }
                 
                 if (validEvent) {
+                    // *** NOTIFY COORDINATION SYSTEM ***
+                    usbSyncController.notifyButtonActivity();
+                    
                     // *** SINGLE EVENT SYSTEM: Only update Unified LED Manager ***
                     // This eliminates double event processing and duplicate LED updates
                     ledManager.setButtonState(ledIndex, pressed);
@@ -1199,6 +1241,13 @@ void ControlPadHardware::updateButtonHighlights() {
 }
 
 void ControlPadHardware::updateUnifiedLEDs() {
+    // *** USB CLEANUP PROTECTION CHECK ***
+    extern USBSynchronizedPacketController usbSyncController;
+    if (usbSyncController.isUSBCleanupActive()) {
+        // Skip LED update during USB cleanup to prevent flickering
+        return;
+    }
+    
     // Check if we need to send an LED update
     if (ledManager.shouldSendUpdate()) {
         const ControlPadColor* ledState = ledManager.getLEDState();

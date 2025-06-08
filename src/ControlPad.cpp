@@ -1,8 +1,12 @@
 #include "ControlPad.h"
 #include "ControlPadHardware.h"
+#include "USBSynchronizedPacketController.h"
 #include <algorithm>
 
 ControlPadHardware* hw;
+
+// External reference to the global USB synchronization controller
+extern USBSynchronizedPacketController usbSyncController;
 
 ControlPad::ControlPad() {
     hw = nullptr;
@@ -196,28 +200,28 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
     
     // DIRECT ASSIGNMENT - No intermediate calculations
     if (pressed) {
-        // Direct white highlight assignment for immediate visual feedback
-        Serial.printf("🔥 Button %d PRESSED: Base=RGB(%d,%d,%d) → WHITE highlighting\n", 
-                     buttonIndex + 1,
-                     baseColors[buttonIndex].r, baseColors[buttonIndex].g, baseColors[buttonIndex].b);
+        // IMMEDIATE button press highlighting - no coordination delay
         currentColors[buttonIndex] = {255, 255, 255};
+        Serial.printf("⚡ IMMEDIATE highlight for button %d press\n", buttonIndex + 1);
     } else {
-        // Direct base color restore assignment - ensure we have valid base colors
-        if (baseColors[buttonIndex].r == 0 && baseColors[buttonIndex].g == 0 && baseColors[buttonIndex].b == 0) {
-            // Default base color if not set
-            baseColors[buttonIndex] = {64, 64, 64};
-            Serial.printf("⚠️ Button %d had no base color, setting default gray\n", buttonIndex + 1);
+        // Only coordinate button RELEASES to prevent flickering during restore
+        if (!usbSyncController.isSafeToSendPacket()) {
+            Serial.printf("🚫 Button %d release blocked by coordination - will retry\n", buttonIndex + 1);
+            // Mark LED as dirty so it will be sent when coordination allows
+            ledDirtyFlags[buttonIndex] = true;
+            ledsDirty = true;
+            return;
         }
-        Serial.printf("⚡ Button %d RELEASED: WHITE → Restoring Base=RGB(%d,%d,%d)\n", 
-                     buttonIndex + 1, 
-                     baseColors[buttonIndex].r, 
-                     baseColors[buttonIndex].g, 
-                     baseColors[buttonIndex].b);
+        
+        // Restore base color with coordination
+        if (baseColors[buttonIndex].r == 0 && baseColors[buttonIndex].g == 0 && baseColors[buttonIndex].b == 0) {
+            baseColors[buttonIndex] = {64, 64, 64};  // Default base color
+        }
         currentColors[buttonIndex] = baseColors[buttonIndex];
+        Serial.printf("⚡ COORDINATED restore for button %d release\n", buttonIndex + 1);
     }
     
-    // ⚡ NON-BLOCKING ASYNC LED UPDATE - Don't wait, just try once
-    // If async system is busy, we'll try again on the next button event
+    // ⚡ LED UPDATE - Immediate for press, coordinated for release
     if (hw) {
         bool success = hw->setAllLeds(currentColors, CONTROLPAD_NUM_BUTTONS);
         if (!success) {
@@ -227,7 +231,8 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
         }
         
         // Debug: Show first few colors being sent to hardware
-        Serial.printf("📤 Sending to hardware: [0]=RGB(%d,%d,%d), [%d]=RGB(%d,%d,%d), [23]=RGB(%d,%d,%d)\n",
+        Serial.printf("📤 %s: [0]=RGB(%d,%d,%d), [%d]=RGB(%d,%d,%d), [23]=RGB(%d,%d,%d)\n",
+                     pressed ? "Immediate press" : "Coordinated release",
                      currentColors[0].r, currentColors[0].g, currentColors[0].b,
                      buttonIndex, currentColors[buttonIndex].r, currentColors[buttonIndex].g, currentColors[buttonIndex].b,
                      currentColors[23].r, currentColors[23].g, currentColors[23].b);
