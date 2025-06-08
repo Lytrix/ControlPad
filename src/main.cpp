@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <USBHost_t36.h>  // For USBHost Task() processing
-#include "ControlPad.h"
 #include "ControlPadHardware.h"  // For USBControlPad class
+#include "ControlPad.h"
+#include "USBSynchronizedPacketController.h"
 
 // ===== USB HOST SETUP (USBHost_t36 standard pattern) =====
 // These must be declared at global scope for automatic driver discovery
@@ -62,6 +63,15 @@ void setup() {
     controlPad.enableAnimation();
     
     Serial.println("🎮 Ready - Animation active, press buttons for highlighting");
+    
+    // Initialize the USB-synchronized controller
+    usbSyncController.initialize();
+    
+    Serial.println("🚀 ControlPad initialized with USB-synchronized packet timing");
+    Serial.println("📋 Packet timing windows:");
+    Serial.println("   📦 Critical packets 1-2: 0-10ms in USB cycle");  
+    Serial.println("   📤 Normal packets 3-4: 15-25ms in USB cycle");
+    Serial.println("   🔧 USB management: 25-32ms in USB cycle");
 }
 
 void loop() {
@@ -71,25 +81,30 @@ void loop() {
     
     loopCounter++;
     
-    // *** CRITICAL: ONLY USBHost_t36 Task() - This is the proper pattern ***
-    // All events come through USB callbacks, no custom polling needed
+    // *** HITCH HIKE ON USB HOST PROCESSES ***
+    // Monitor actual USB Host activity patterns instead of predicting timing
+    usbSyncController.monitorUSBActivity();
+    
+    // *** CRITICAL: USB Host Task() - This is what we're hitch hiking on ***
+    // The USB activity monitor watches this process to detect when USB is busy
     globalUSBHost.Task();
     
-    // *** UNIFIED LED MANAGER ***
+    // *** UNIFIED LED MANAGER WITH USB CLEANUP PROTECTION ***
     // Check for LED updates every 50ms (fast MIDI looper feedback requirement)
     if (millis() - lastAnimationUpdate >= 50) {
-        controlPad.updateUnifiedLEDs();
+        // *** CHECK USB CLEANUP PROTECTION BEFORE LED UPDATES ***
+        if (!usbSyncController.isUSBCleanupActive()) {
+            controlPad.updateUnifiedLEDs();
+        } else {
+            // USB cleanup in progress - skip LED update to prevent flickering
+            Serial.println("🛡️ LED update SKIPPED - USB cleanup protection active");
+        }
         lastAnimationUpdate = millis();
     }
     
     // Minimal status output every 10 seconds
     if (millis() - lastDebug >= 10000) {
+        Serial.printf("⚡ Main Loop: %lu cycles, LED updates active\n", loopCounter);
         lastDebug = millis();
-        
-        size_t queueSize;
-        bool isProcessing;
-        getLEDQueueStatus(&queueSize, &isProcessing);
-        
-        Serial.printf("Status: Loop #%lu - Queue: %zu items\n", loopCounter, queueSize);
     }
 }
