@@ -186,18 +186,26 @@ void USBControlPad::kbd_poll(int result) {
             atomQueuePut(queue, 0, &event);
         }
         
-        // Restart keyboard polling
-        int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
-        if (restart != 0) {
-            kbd_polling = false;
+        // Only restart keyboard polling if LED update is not in progress
+        if (!atomicLEDUpdateInProgress) {
+            int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
+            if (restart != 0) {
+                kbd_polling = false;
+            }
+        } else {
+            kbd_polling = false; // Stop polling during LED updates
         }
     } else if (result < 0) {
         kbd_polling = false;
     } else if (result == 0) {
-        // Still restart polling to keep listening
-        int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
-        if (restart != 0) {
-            kbd_polling = false;
+        // Only restart polling if LED update is not in progress
+        if (!atomicLEDUpdateInProgress) {
+            int restart = InterruptMessage(kbd_ep_in, 8, kbd_report, &kbd_poll_cb);
+            if (restart != 0) {
+                kbd_polling = false;
+            }
+        } else {
+            kbd_polling = false; // Stop polling during LED updates
         }
     }
 }
@@ -284,9 +292,13 @@ void USBControlPad::ctrl_poll(int result) {
     }
     
     restart_polling:
-    // Restart the control polling
-    if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) != 0) {
-        ctrl_polling = false;
+    // Only restart control polling if LED update is not in progress
+    if (!atomicLEDUpdateInProgress) {
+        if (InterruptMessage(ctrl_ep_in, 64, ctrl_report, &ctrl_poll_cb) != 0) {
+            ctrl_polling = false;
+        }
+    } else {
+        ctrl_polling = false; // Stop polling during LED updates
     }
 }
 
@@ -448,25 +460,9 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
         return false;
     }
     
-    // SIMPLIFIED: Remove mutex to test if it's causing issues
-    // if (usbCommandMutex) {
-    //     if (atomMutexGet(usbCommandMutex, 100) != ATOM_OK) {  // 100ms timeout
-    //         Serial.println("❌ USB Command Mutex timeout in sendCommand()");
-    //         return false;  // Failed to acquire mutex in time
-    //     }
-    // }
-
-    // Send via interrupt transfer to control endpoint
-    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
-    
-    // SIMPLIFIED: Minimal delay to test if timing is the issue
-    delayMicroseconds(850);
-    
-    // Release mutex after command completes
-    // if (usbCommandMutex) {
-    //     atomMutexPut(usbCommandMutex);
-    // }
-    
+    // ZERO-CLEANUP APPROACH: Remove all mutexes, delays, and verification
+    // Just send the raw USB packet synchronously and return immediately
+    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data));
     return (result == 0);
 }
 
@@ -475,61 +471,10 @@ bool USBControlPad::sendLEDCommandWithVerification(const uint8_t* data, size_t l
         return false;
     }
     
-    // FAST MODE: Skip verification entirely during button events to eliminate timing conflicts
-    // The 50ms verification timeout was causing interference with button press/release cycles
-    if (atomicLEDUpdateInProgress) {
-        // During LED updates, use simplified command sending without verification delays
-        int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb);
-        
-        // CRITICAL: Device needs time to process LED commands - but use minimal delay
-        delayMicroseconds(850); // Back to working timing that doesn't black out
-        return (result == 0);
-    }
-    
-    // SINGLE SERIALIZATION POINT: Use AtomThreads mutex for proper USB command flow
-    // This prevents the 100ms-1s timing interference window discovered by user
-    if (usbCommandMutex) {
-        // Use timeout instead of forever wait to prevent hangs
-        if (atomMutexGet(usbCommandMutex, 50) != ATOM_OK) {  // 100ms timeout
-            Serial.println("❌ USB Command Mutex timeout in sendLEDCommandWithVerification()");
-            return false;  // Failed to acquire mutex in time
-        }
-    }
-    
-    // SEQUENTIAL MODE: Always use verification for reliable command sequencing
-    // Clear any pending verification data and flush stale echoes
-    ledCommandVerified = false;
-    expectedLEDEcho[0] = expectedEcho1;
-    expectedLEDEcho[1] = expectedEcho2;
-    
-    // Send the command
-    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data), &send_cb); 
-    if (result != 0) {
-        if (usbCommandMutex) {
-            atomMutexPut(usbCommandMutex);
-        }
-        return false;
-    }
-    
-    // SIMPLE VERIFICATION: Just wait for echo without complex cleanup logic
-    unsigned long startTime = millis();
-    while (!ledCommandVerified && (millis() - startTime) < 10) {
-        delayMicroseconds(100);
-        yield(); // Allow USB processing
-    }
-    
-    if (!ledCommandVerified) {
-        // Verification failure - USB echo timeout
-        // Serial.printf("⚠️ LED command echo timeout: expected %02X %02X\n", expectedEcho1, expectedEcho2);
-    }
-    
-    // Release USB command mutex
-    if (usbCommandMutex) {
-        atomMutexPut(usbCommandMutex);
-    }
-    
-    // Always return success during LED updates to avoid blocking
-    return true;
+    // ZERO-CLEANUP APPROACH: Remove all verification, mutexes, and delays
+    // Just send the raw USB packet synchronously - no waiting, no cleanup
+    int result = InterruptMessage(ctrl_ep_out, length, const_cast<uint8_t*>(data));
+    return (result == 0);
 }
 
 bool USBControlPad::sendCommandWithVerification(const uint8_t* data, size_t length, uint8_t expectedEcho1, uint8_t expectedEcho2) {
@@ -546,16 +491,18 @@ void USBControlPad::setFastMode(bool enabled) {
     }
 }
 
-// 🚀 SIMPLE LED UPDATE IMPLEMENTATION - Back to Basics
+// 🚀 ZERO-CLEANUP LED UPDATE - Minimally disruptive polling control
 void USBControlPad::pauseUSBPolling() {
+    // Set flag to stop polling callbacks from restarting themselves
     atomicLEDUpdateInProgress = true;
 }
 
 void USBControlPad::resumeUSBPolling() {
-    // CRITICAL: Ensure USB communication pipeline is completely clear
-    // before allowing next LED update - prevents sporadic interference
-    delay(3); // 3ms USB quiet period to prevent accumulation
+    // Allow polling callbacks to restart immediately
     atomicLEDUpdateInProgress = false;
+    
+    // Don't manually restart polling - let the callbacks restart themselves
+    // on their next natural cycle to avoid timing disruption
 }
 
 bool USBControlPad::setCustomMode() {
@@ -643,53 +590,84 @@ bool USBControlPad::sendFinalizeCommand() {
     bool success = sendCommand(cmd, 64);
     return success;
 }
+// static uint16_t updateCounter = 0; // Removed for zero-cleanup approach
 
 bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     if (!initialized || count > 24) {
-        // Serial.println("❌ Cannot update LEDs: not initialized or too many LEDs");
         return false;
     }
     
-    // CRITICAL: Create atomic snapshot to prevent modification during Package1→Package2 
-    // This prevents the 4-cycle pattern caused by colors changing between packages
-    static ControlPadColor atomicColorBuffer[24];
-    memcpy(atomicColorBuffer, colors, 24 * sizeof(ControlPadColor));
+    // ZERO-CLEANUP APPROACH: Direct USB send with no infrastructure
+    // This eliminates all memory management, mutexes, and background processing
     
-    // 🚀 OPTIMIZED ATOMIC LED UPDATE - Minimal Commands Only
-    // Remove setCustomMode() from every button press - only needed at startup!
-    // This eliminates the LED controller reset that causes black flashes
+    // ZERO-CLEANUP APPROACH: Send LED packets directly without any infrastructure
+    // Package 1
+    uint8_t cmd1[64] = {
+        0x56, 0x83, 0x00, 0x00,    // Header
+        0x01, 0x00, 0x00, 0x00,    // Package 1 marker
+        0x80, 0x01, 0x00, 0x00,    // Control flags
+        0xff, 0x00, 0x00, 0x00,    // Color flags
+        0x00, 0x00,                // Reserved
+        0xff, 0xff,                // Brightness for all LEDs
+        0x00, 0x00, 0x00, 0x00     // Reserved
+    };
     
-    // SIMPLE LED UPDATE - Remove all unnecessary complexity
-    pauseUSBPolling();
-    bool success = true;
-    // TEENSY 4.x DMA FLUSH: Prevent TeensyUSBHost2 buffer accumulation 
-    // static uint16_t updateCounter = 0;
-    // updateCounter++;
+    size_t pos = 24;
+    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20)
+    cmd1[pos++] = colors[0].r;   cmd1[pos++] = colors[0].g;   cmd1[pos++] = colors[0].b;
+    cmd1[pos++] = colors[5].r;   cmd1[pos++] = colors[5].g;   cmd1[pos++] = colors[5].b;
+    cmd1[pos++] = colors[10].r;  cmd1[pos++] = colors[10].g;  cmd1[pos++] = colors[10].b;
+    cmd1[pos++] = colors[15].r;  cmd1[pos++] = colors[15].g;  cmd1[pos++] = colors[15].b;
+    cmd1[pos++] = colors[20].r;  cmd1[pos++] = colors[20].g;  cmd1[pos++] = colors[20].b;
+    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21)
+    cmd1[pos++] = colors[1].r;   cmd1[pos++] = colors[1].g;   cmd1[pos++] = colors[1].b;
+    cmd1[pos++] = colors[6].r;   cmd1[pos++] = colors[6].g;   cmd1[pos++] = colors[6].b;
+    cmd1[pos++] = colors[11].r;  cmd1[pos++] = colors[11].g;  cmd1[pos++] = colors[11].b;
+    cmd1[pos++] = colors[16].r;  cmd1[pos++] = colors[16].g;  cmd1[pos++] = colors[16].b;
+    cmd1[pos++] = colors[21].r;  cmd1[pos++] = colors[21].g;  cmd1[pos++] = colors[21].b;
+    // Column 3: buttons 3,8,13 (indices 2,7,12)
+    cmd1[pos++] = colors[2].r;   cmd1[pos++] = colors[2].g;   cmd1[pos++] = colors[2].b;
+    cmd1[pos++] = colors[7].r;   cmd1[pos++] = colors[7].g;   cmd1[pos++] = colors[7].b;
+    cmd1[pos++] = colors[12].r;  cmd1[pos++] = colors[12].g;  cmd1[pos++] = colors[12].b;
+    cmd1[pos++] = colors[17].r;  // Button 18 R
     
-    // Essential commands only - use ATOMIC BUFFER for both packages
-    success &= sendLEDPackage1(atomicColorBuffer);
-    //delayMicroseconds(650); // CRITICAL: Package 1→Package 2 gap - prevent overwrite
-    success &= sendLEDPackage2(atomicColorBuffer);
+    // Package 2
+    uint8_t cmd2[64] = {0x56, 0x83, 0x01};
+    pos = 3;
+    cmd2[pos++] = 0x00;  // Padding
+    cmd2[pos++] = colors[17].g;  // Button 18 G
+    cmd2[pos++] = colors[17].b;  // Button 18 B
+    cmd2[pos++] = colors[22].r; cmd2[pos++] = colors[22].g; cmd2[pos++] = colors[22].b;
+    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23)
+    cmd2[pos++] = colors[3].r;   cmd2[pos++] = colors[3].g;   cmd2[pos++] = colors[3].b;
+    cmd2[pos++] = colors[8].r;   cmd2[pos++] = colors[8].g;   cmd2[pos++] = colors[8].b;
+    cmd2[pos++] = colors[13].r;  cmd2[pos++] = colors[13].g;  cmd2[pos++] = colors[13].b;
+    cmd2[pos++] = colors[18].r;  cmd2[pos++] = colors[18].g;  cmd2[pos++] = colors[18].b;
+    cmd2[pos++] = colors[23].r;  cmd2[pos++] = colors[23].g;  cmd2[pos++] = colors[23].b;
+    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19)
+    cmd2[pos++] = colors[4].r;   cmd2[pos++] = colors[4].g;   cmd2[pos++] = colors[4].b;
+    cmd2[pos++] = colors[9].r;   cmd2[pos++] = colors[9].g;   cmd2[pos++] = colors[9].b;
+    cmd2[pos++] = colors[14].r;  cmd2[pos++] = colors[14].g;  cmd2[pos++] = colors[14].b;
+    cmd2[pos++] = colors[19].r;  cmd2[pos++] = colors[19].g;  cmd2[pos++] = colors[19].b;
     
-    // TEENSY4 i.MX RT SPECIFIC: USB state reset every 50 updates to prevent accumulation
-    // if (updateCounter % 24 == 0) {
-    //     // Alternative approach: Force USB polling restart to clear TeensyUSBHost2 state
-    //     pauseUSBPolling();
-    //     delay(5); // Longer USB quiet period to clear i.MX RT USB controller state
-    //     resumeUSBPolling();
-    // }
-    success &= sendApplyCommand();
-    success &= sendFinalizeCommand();
+    // Apply command
+    uint8_t cmd3[64] = {0x41, 0x80};
     
-    resumeUSBPolling();
+    // Finalize command
+    uint8_t cmd4[64] = {0x51, 0x28, 0x00, 0x00, 0xff, 0x00};
     
-    // if (success) {
-    //     Serial.println("✅ Atomic LED update completed");
-    // } else {
-    //     Serial.println("❌ Atomic LED update failed");
-    // }
+    // Send all commands without polling disruption (testing)
+    bool result = true;
     
-    return success;
+    // Temporary: Disable polling control to test if that's causing black LEDs
+    // pauseUSBPolling();
+    result &= (InterruptMessage(ctrl_ep_out, 64, cmd1) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 64, cmd2) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 64, cmd3) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 64, cmd4) == 0);
+    // resumeUSBPolling();
+    
+    return result;
 }
 
 bool USBControlPad::sendLEDPackage1(const ControlPadColor* colors) {
