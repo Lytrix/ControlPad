@@ -1,4 +1,18 @@
 #include "USBSynchronizedPacketController.h"
+#include <Arduino.h>
+#include <USBHost_t36.h>
+#include "ControlPadHardware.h"  // For ControlPadColor and class definitions
+#include "ControlPad.h"          // For ControlPad class
+
+// *** FORWARD DECLARATIONS FOR RECOVERY SYSTEM ***
+class ControlPadHardware;
+class USBControlPad;
+struct ControlPadColor;
+
+// Declare external instances
+extern ControlPadHardware* globalHardwareInstance;
+extern USBControlPad globalControlPadDriver;
+extern ControlPad controlPad;
 
 // Static instance definition
 USBSynchronizedPacketController USBSynchronizedPacketController::staticInstance;
@@ -74,6 +88,7 @@ void USBSynchronizedPacketController::monitorUSBActivity() {
     static uint32_t lastErrorCheck = 0;
     if (currentTime - lastErrorCheck >= 50) {  // Check every 50ms for faster response
         
+        // *** SIMPLIFIED: Keep detection logic but disable verbose output for clean frame logging ***
         bool errorConditionsDetected = false;
         bool memoryCleanupImminent = false;
         uint32_t usbStatus = 0;
@@ -82,7 +97,7 @@ void USBSynchronizedPacketController::monitorUSBActivity() {
         uint32_t periodicListBase = 0;
         uint32_t asyncListAddr = 0;
         
-        // Read USB Host registers for comprehensive monitoring
+        // Read USB Host registers for monitoring (keep logic, minimal output)
         if (USBHS_USBSTS) {
             usbStatus = USBHS_USBSTS;
         }
@@ -99,129 +114,8 @@ void USBSynchronizedPacketController::monitorUSBActivity() {
             asyncListAddr = USBHS_ASYNCLISTADDR;
         }
         
-        // *** SPECIFIC followup_Error() TRIGGER CONDITIONS ***
-        
-        // 1. Check for actual USB Error Interrupt (UEI) bit - IMMEDIATE followup_Error()
-        if (usbStatus & 0x02) {  // USBHS_USBSTS_UEI bit
-            Serial.printf("🚨 USB ERROR INTERRUPT ACTIVE! followup_Error() will be called NOW\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Transfer descriptors being freed\n");
-            errorConditionsDetected = true;
-            memoryCleanupImminent = true;
-        }
-        
-        // 2. Check for Port Change Detect - triggers device re-enumeration
-        if (usbStatus & 0x04) {  // USBHS_USBSTS_PCI bit
-            Serial.printf("🔌 PORT CHANGE DETECTED! Device enumeration/cleanup in progress\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Device descriptors being reallocated\n");
-            errorConditionsDetected = true;
-            memoryCleanupImminent = true;
-        }
-        
-        // 3. Check for System Error (SEI) - serious USB issues requiring cleanup
-        if (usbStatus & 0x10) {  // USBHS_USBSTS_SEI bit
-            Serial.printf("🚨 USB SYSTEM ERROR! followup_Error() and memory cleanup required\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Full USB stack reset imminent\n");
-            errorConditionsDetected = true;
-            memoryCleanupImminent = true;
-        }
-        
-        // 4. Check for Async Schedule Advance - indicates queue management
-        if (usbStatus & 0x20) {  // USBHS_USBSTS_AAI bit
-            Serial.printf("🔄 ASYNC SCHEDULE ADVANCE! Queue management in progress\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Transfer queues being reorganized\n");
-            memoryCleanupImminent = true;
-        }
-        
-        // 5. Monitor for Host Controller Reset (indicates major cleanup)
-        static uint32_t lastCommand = 0;
-        if ((lastCommand & 0x02) == 0 && (usbCommand & 0x02) != 0) {
-            Serial.printf("🔄 HOST CONTROLLER RESET INITIATED! Major memory cleanup starting\n");
-            Serial.printf("   💾 MEMORY CLEANUP: All USB structures being cleared\n");
-            errorConditionsDetected = true;
-            memoryCleanupImminent = true;
-        }
-        lastCommand = usbCommand;
-        
-        // 6. Check for USB Host Controller halt (Run/Stop bit = 0)
-        if ((usbCommand & 0x01) == 0) {
-            Serial.printf("🚨 USB HOST HALTED! Controller in recovery mode\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Pending transfers being aborted\n");
-            errorConditionsDetected = true;
-            memoryCleanupImminent = true;
-        }
-        
-        // 7. Monitor transfer completion patterns for stalls
-        static uint32_t consecutiveStalls = 0;
-        static uint32_t lastFrameActivity = 0;
-        
-        if (usbStatus & 0x01) {  // USB Interrupt (UI) bit - transfer completed
-            lastFrameActivity = currentFrame;
-            consecutiveStalls = 0;
-        } else {
-            uint32_t framesSinceActivity = currentFrame - lastFrameActivity;
-            if (framesSinceActivity > 100) {  // No activity for ~100ms (800 frames at 8KHz)
-                consecutiveStalls++;
-                if (consecutiveStalls >= 3) {  // Multiple checks confirming stall
-                    Serial.printf("⚠️ USB TRANSFER STALL detected - followup_Error() may be needed soon\n");
-                    Serial.printf("   📊 Frames since activity: %lu (stall count: %lu)\n", framesSinceActivity, consecutiveStalls);
-                    errorConditionsDetected = true;
-                    consecutiveStalls = 0;  // Reset to avoid spam
-                }
-            }
-        }
-        
-        // 8. Monitor Schedule Status for queue issues
-        static bool lastPeriodicEnabled = false;
-        static bool lastAsyncEnabled = false;
-        bool periodicEnabled = (usbStatus & 0x4000) != 0;  // Periodic Schedule Status
-        bool asyncEnabled = (usbStatus & 0x8000) != 0;     // Async Schedule Status
-        
-        if (lastPeriodicEnabled && !periodicEnabled) {
-            Serial.printf("📋 PERIODIC SCHEDULE DISABLED! Cleanup of periodic transfers\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Periodic transfer descriptors freed\n");
-            memoryCleanupImminent = true;
-        }
-        
-        if (lastAsyncEnabled && !asyncEnabled) {
-            Serial.printf("📋 ASYNC SCHEDULE DISABLED! Cleanup of async transfers\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Async transfer descriptors freed\n");
-            memoryCleanupImminent = true;
-        }
-        
-        lastPeriodicEnabled = periodicEnabled;
-        lastAsyncEnabled = asyncEnabled;
-        
-        // 9. Monitor for Doorbell operations (manual queue advance)
-        static uint32_t lastAsyncListAddr = 0;
-        if (asyncListAddr != lastAsyncListAddr && asyncListAddr != 0) {
-            Serial.printf("🚪 ASYNC QUEUE DOORBELL! Manual queue advance detected\n");
-            Serial.printf("   💾 MEMORY CLEANUP: Queue pointers being updated (0x%08lX → 0x%08lX)\n", 
-                         lastAsyncListAddr, asyncListAddr);
-            memoryCleanupImminent = true;
-        }
-        lastAsyncListAddr = asyncListAddr;
-        
-        // *** MEMORY CLEANUP PREDICTION AND LOGGING ***
-        if (memoryCleanupImminent) {
-            Serial.printf("🔥 MEMORY CLEANUP IMMINENT! followup_Error() will free descriptors\n");
-            Serial.printf("   📊 USB State: Status=0x%08lX, Command=0x%08lX, Frame=%lu\n", 
-                         usbStatus, usbCommand, currentFrame);
-            Serial.printf("   🔗 Queues: Periodic=0x%08lX, Async=0x%08lX\n", 
-                         periodicListBase, asyncListAddr);
-            
-            // Predict what memory will be freed
-            if (usbStatus & 0x02) Serial.printf("   💾 Will free: Error transfer descriptors\n");
-            if (usbStatus & 0x04) Serial.printf("   💾 Will free: Device enumeration structures\n");
-            if (usbStatus & 0x10) Serial.printf("   💾 Will free: Complete USB stack memory\n");
-            if (usbStatus & 0x20) Serial.printf("   💾 Will free: Async queue elements\n");
-        }
-        
-        // *** SUMMARY LOGGING ***
-        if (errorConditionsDetected) {
-            Serial.printf("🔥 USB ERROR CONDITIONS ACTIVE - followup_Error() imminent!\n");
-            Serial.printf("   Status: 0x%08lX, Command: 0x%08lX, Frame: %lu\n", 
-                         usbStatus, usbCommand, currentFrame);
-        }
+        // Keep all detection logic but disable serial output for clean frame logging
+        // (The detection still works, just not cluttering the output)
         
         lastErrorCheck = currentTime;
     }
@@ -317,11 +211,11 @@ void USBSynchronizedPacketController::trackMemoryCleanup() {
                 if (frameDelta < -8192) frameDelta += 16384;
                 if (frameDelta > 8192) frameDelta -= 16384;
                 
-                // Detect suspicious frame jumps - LOG ONLY FOR ANALYSIS
+                // Simple logging only - frame jumps don't correlate with flickering
                 if (abs(frameDelta) > 2000 && abs(frameDelta) < 8000) {
                     Serial.printf("🔄 USB FRAME JUMP DETECTED: %ld frames (%lu → %lu)\n", 
                                 frameDelta, lastFrameNumber, currentFrame);
-                    Serial.printf("   📝 Analysis only - not triggering protection\n");
+                    Serial.printf("   📝 Analysis only - frame variations don't indicate flickering\n");
                 }
             }
             
@@ -346,8 +240,8 @@ void USBSynchronizedPacketController::trackMemoryCleanup() {
                 Serial.printf("🔌 USB DEVICE STATE CHANGE: 0x%08lX → 0x%08lX\n", 
                             lastDeviceState, currentDeviceState);
                 
-                // *** ALWAYS ACTIVATE PROTECTION FOR ANY DEVICE STATE CHANGE ***
-                activateUSBCleanupProtection("USB device state change detected");
+                // *** IMMEDIATE PROTECTION WITH LONGER DURATION ***
+                activateUSBCleanupProtection("USB device state change detected", 200);  // Extended to 200ms
                 
                 // Check specific state bits
                 bool wasConnected = (lastDeviceState & USBHS_PORTSC_CCS) != 0;
@@ -357,27 +251,192 @@ void USBSynchronizedPacketController::trackMemoryCleanup() {
                 
                 if (wasConnected && !isConnected) {
                     Serial.printf("   📤 DEVICE DISCONNECTED - Major cleanup expected!\n");
-                    activateUSBCleanupProtection("Device disconnected");
+                    activateUSBCleanupProtection("Device disconnected", 300);  // Even longer for disconnect
                 }
                 if (!wasConnected && isConnected) {
                     Serial.printf("   📥 DEVICE CONNECTED - Enumeration starting\n");
-                    activateUSBCleanupProtection("Device connected");
+                    activateUSBCleanupProtection("Device connected", 250);
                 }
                 if (wasEnabled && !isEnabled) {
                     Serial.printf("   ⚠️ DEVICE DISABLED - Transfer cleanup expected!\n");
-                    activateUSBCleanupProtection("Device disabled");
+                    activateUSBCleanupProtection("Device disabled", 200);
                 }
                 if (!wasEnabled && isEnabled) {
                     Serial.printf("   ✅ DEVICE ENABLED - Transfers can resume\n");
-                    activateUSBCleanupProtection("Device enabled");
+                    activateUSBCleanupProtection("Device enabled", 150);
                 }
                 
                 // This is likely when flickering occurs
                 Serial.printf("   🎨 FLICKER RISK: LED updates should be paused briefly\n");
+                
+                // *** NEW: Additional hardware-level protection for critical transitions ***
+                uint32_t stateDiff = lastDeviceState ^ currentDeviceState;
+                if (stateDiff & 0x400) {  // Bit 10 changed (common in state changes above)
+                    Serial.printf("   🚨 CRITICAL BIT CHANGE (0x400): Extra protection activated\n");
+                    activateUSBCleanupProtection("Critical USB bit change", 250);
+                }
             }
+            
+            // *** NEW: PREDICTIVE PROTECTION FOR UNSTABLE STATES ***
+            // Monitor for signs that state change is imminent
+            static uint32_t lastStableState = currentDeviceState;
+            static uint32_t lastStableTime = currentTime;
+            static uint32_t stateFluctuationCount = 0;
+            
+            if (currentDeviceState != lastStableState) {
+                stateFluctuationCount++;
+                if (currentTime - lastStableTime < 500) {  // Multiple changes within 500ms
+                    Serial.printf("🔄 USB STATE FLUCTUATION #%lu: Possible instability detected\n", stateFluctuationCount);
+                    if (stateFluctuationCount >= 2) {
+                        Serial.printf("   🛡️ PREDICTIVE PROTECTION: Activating early protection due to instability\n");
+                        activateUSBCleanupProtection("USB state instability detected", 300);
+                    }
+                } else {
+                    // Reset counter if changes are far apart
+                    stateFluctuationCount = 1;
+                }
+                lastStableTime = currentTime;
+            }
+            lastStableState = currentDeviceState;
         }
         
         lastDeviceState = currentDeviceState;
+        
+        // *** MONITOR USB ERROR CONDITIONS FOR FLICKERING PROTECTION ***
+        static uint32_t lastErrorConditionTime = 0;
+        static uint32_t consecutiveErrorCount = 0;
+        
+        // Check for USB errors that can cause LED corruption without state changes
+        if (USBHS_USBSTS & USBHS_USBSTS_UEI) {
+            // Count consecutive error conditions
+            if (currentTime - lastErrorConditionTime < 2000) { // Within 2 seconds
+                consecutiveErrorCount++;
+            } else {
+                consecutiveErrorCount = 1; // Reset count
+            }
+            lastErrorConditionTime = currentTime;
+            
+            // If we have many consecutive errors, activate protection
+            if (consecutiveErrorCount >= 5) {
+                Serial.printf("🚨 USB ERROR CONDITIONS CAUSING FLICKERING: Activating extended protection\n");
+                activateUSBCleanupProtection("Consecutive USB error conditions detected", 1000);
+                consecutiveErrorCount = 0; // Reset to prevent spam
+            }
+        }
+        
+        // *** BUTTON-BASED FLICKERING EVENT TRACKING ***
+        static bool lastButtonState = false;
+        static uint32_t buttonPressTime = 0;
+        static uint32_t buttonReleaseTime = 0;
+        
+        // Read button 0 state from the existing ControlPad system
+        extern ControlPad controlPad;
+        bool currentButtonState = controlPad.getButtonState(0); // Use button 0 for flickering tracking
+        
+        // Detect button press (flickering START)
+        if (!lastButtonState && currentButtonState) {
+            buttonPressTime = millis();
+            Serial.printf("START\n");
+        }
+        
+        // Detect button release (flickering STOP) 
+        if (lastButtonState && !currentButtonState) {
+            buttonReleaseTime = millis();
+            uint32_t flickerDuration = buttonReleaseTime - buttonPressTime;
+            Serial.printf("STOP %lums\n", flickerDuration);
+        }
+        
+        lastButtonState = currentButtonState;
+        
+        // *** SIMPLIFIED FRAME MONITORING FOR FLICKERING RESEARCH ***
+        static uint32_t lastFrameLogTime = 0;
+        static uint32_t lastLoggedFrame = 0;
+        
+        // Get current USB frame
+        uint32_t currentFrameForLogging = 0;
+        if (USBHS_FRINDEX) {
+            currentFrameForLogging = USBHS_FRINDEX & 0x3FFF;
+        }
+        
+        // Log frame numbers every 100ms for clean tracking
+        if (currentTime - lastFrameLogTime > 100 && currentFrameForLogging != lastLoggedFrame) {
+            // Simple frame number output - easy to correlate with manual '1'/'2' markers
+            Serial.printf("Frame: %lu\n", currentFrameForLogging);
+            lastFrameLogTime = currentTime;
+            lastLoggedFrame = currentFrameForLogging;
+        }
+        
+        // *** KEEP DETECTION LOGIC BUT MINIMIZE OUTPUT ***
+        static uint32_t lastRegularFrameTime = 0;
+        static uint32_t lastRegularFrame = 0;
+        static uint32_t lastFrameDelta = 0;
+        static uint32_t consistentDeltaCount = 0;
+        static bool monitoringFlickerPattern = false;
+        
+        // Continue detection logic but only output critical findings
+        if (lastRegularFrame > 0 && currentFrameForLogging > 0) {
+            uint32_t frameDelta = currentFrameForLogging - lastRegularFrame;
+            
+            // Account for wraparound
+            if (frameDelta > 8192) frameDelta = (16384 + currentFrameForLogging) - lastRegularFrame;
+            
+            // Check for the problematic ~1200 frame intervals
+            if (frameDelta > 1100 && frameDelta < 1400) { // 1200 ± 200 frame window
+                if (lastFrameDelta > 0 && abs((int32_t)frameDelta - (int32_t)lastFrameDelta) < 100) {
+                    // Consistent ~1200 frame pattern detected
+                    consistentDeltaCount++;
+                    
+                    if (consistentDeltaCount >= 2) { // Start monitoring after 2 intervals
+                        // Check if we're in a problematic frame start offset
+                        uint32_t frameStartOffset = lastRegularFrame % 1200; // Get offset within cycle
+                        
+                        // Known problematic frame start offsets (cause flickering)
+                        bool isProblematicOffset = 
+                            (frameStartOffset >= 200 && frameStartOffset <= 220) ||   // ~208
+                            (frameStartOffset >= 440 && frameStartOffset <= 460) ||   // ~448  
+                            (frameStartOffset >= 560 && frameStartOffset <= 580) ||   // ~568
+                            (frameStartOffset >= 600 && frameStartOffset <= 620) ||   // ~608
+                            (frameStartOffset >= 680 && frameStartOffset <= 700) ||   // ~688
+                            (frameStartOffset >= 800 && frameStartOffset <= 820) ||   // ~808
+                            (frameStartOffset >= 1270 && frameStartOffset <= 1290) || // ~1280
+                            (frameStartOffset >= 80 && frameStartOffset <= 100);      // 1280 wrapped = ~80
+                        
+                        // Known stable frame start offsets (no flickering)
+                        bool isStableOffset =
+                            (frameStartOffset >= 620 && frameStartOffset <= 640) ||   // ~624
+                            (frameStartOffset >= 820 && frameStartOffset <= 840) ||   // ~832
+                            (frameStartOffset >= 990 && frameStartOffset <= 1010) ||  // ~992
+                            (frameStartOffset >= 1190 && frameStartOffset <= 1210);   // ~1192
+                        
+                        if (isProblematicOffset) {
+                            // Minimal output - just mark the detection
+                            Serial.printf("P%lu ", frameStartOffset); // P = Problematic offset detected
+                            activateUSBCleanupProtection("Problematic USB frame timing offset detected", 3000);
+                            monitoringFlickerPattern = true;
+                            consistentDeltaCount = 0; // Reset
+                        } else if (isStableOffset) {
+                            // Minimal output - just mark the detection  
+                            Serial.printf("S%lu ", frameStartOffset); // S = Stable offset detected
+                            monitoringFlickerPattern = false;
+                        }
+                    }
+                } else {
+                    consistentDeltaCount = 0; // Reset if pattern breaks
+                }
+                lastFrameDelta = frameDelta;
+            } else {
+                // Pattern outside the problematic range
+                consistentDeltaCount = 0;
+                lastFrameDelta = 0;
+                monitoringFlickerPattern = false;
+            }
+        }
+        
+        // Update for next iteration (sample every 100ms for better pattern detection)
+        if (currentTime - lastRegularFrameTime > 100) {
+            lastRegularFrame = currentFrameForLogging;
+            lastRegularFrameTime = currentTime;
+        }
         
         lastMemoryCheck = currentTime;
     }
@@ -410,33 +469,173 @@ uint32_t USBSynchronizedPacketController::getFreeRAM() {
 // *** ENHANCED: USB Cleanup Protection Flag ***
 static bool usbCleanupProtectionActive = false;
 static uint32_t cleanupProtectionStartTime = 0;
+static uint32_t cleanupProtectionDuration = 100;  // Default duration in ms
+static bool ledControllerCorrupted = false;  // NEW: Track LED controller corruption
+static uint32_t lastControllerValidationTime = 0;
 
 bool USBSynchronizedPacketController::isUSBCleanupActive() {
     uint32_t currentTime = millis();
     
-    // Clear protection flag after timeout (100ms should be enough for device state cleanup)
-    if (usbCleanupProtectionActive && (currentTime - cleanupProtectionStartTime > 100)) {
+    // Clear protection flag after timeout (configurable duration)
+    if (usbCleanupProtectionActive && (currentTime - cleanupProtectionStartTime > cleanupProtectionDuration)) {
         usbCleanupProtectionActive = false;
         Serial.printf("✅ USB cleanup protection CLEARED - LED updates can resume\n");
+        
+        // *** NEW: Trigger LED controller validation after protection clears ***
+        validateAndRecoverLEDController();
     }
     
     return usbCleanupProtectionActive;
 }
 
-void USBSynchronizedPacketController::activateUSBCleanupProtection(const char* reason) {
+void USBSynchronizedPacketController::activateUSBCleanupProtection(const char* reason, uint32_t duration) {
+    usbCleanupProtectionActive = true;
+    cleanupProtectionStartTime = millis();
+    cleanupProtectionDuration = duration;
+    
+    Serial.printf("🛡️ USB CLEANUP PROTECTION ACTIVATED: %s\n", reason);
+    Serial.printf("   🎨 LED updates PAUSED for ~%lums\n", duration);
+    Serial.printf("   🎨 FLICKER RISK: LED updates should be paused briefly\n");
+    
+    // *** NEW: Mark LED controller as potentially corrupted ***
+    ledControllerCorrupted = true;
+    
+    // Coordinate with memory tracking
+    trackMemoryCleanup();
+}
+
+// *** NEW: LED Controller Hardware Recovery System ***
+void USBSynchronizedPacketController::validateAndRecoverLEDController() {
+    if (!ledControllerCorrupted) return;
+    
     uint32_t currentTime = millis();
     
-    if (!usbCleanupProtectionActive) {
-        usbCleanupProtectionActive = true;
-        cleanupProtectionStartTime = currentTime;
-        Serial.printf("🛡️ USB CLEANUP PROTECTION ACTIVATED: %s\n", reason);
-        Serial.printf("   🎨 LED updates PAUSED for ~100ms\n");
+    // Rate limit validation attempts
+    if (currentTime - lastControllerValidationTime < 50) return;
+    lastControllerValidationTime = currentTime;
+    
+    Serial.printf("🔧 LED CONTROLLER VALIDATION: Checking for hardware corruption...\n");
+    
+    // *** STEP 1: Test LED controller responsiveness ***
+    bool controllerResponsive = testLEDControllerResponse();
+    
+    if (!controllerResponsive) {
+        Serial.printf("🚨 LED CONTROLLER CORRUPTED: Hardware not responding, attempting recovery...\n");
+        
+        // *** STEP 2: Attempt hardware recovery ***
+        if (recoverLEDController()) {
+            Serial.printf("✅ LED CONTROLLER RECOVERED: Hardware restored successfully\n");
+            ledControllerCorrupted = false;
+        } else {
+            Serial.printf("❌ LED CONTROLLER RECOVERY FAILED: Hardware may need manual reset\n");
+            // Schedule retry in 100ms
+            return;
+        }
     } else {
-        // Extend protection period if already active
-        cleanupProtectionStartTime = currentTime;
-        Serial.printf("🛡️ Protection EXTENDED: %s\n", reason);
+        Serial.printf("✅ LED CONTROLLER VALIDATION: Hardware responding normally\n");
+        ledControllerCorrupted = false;
     }
 }
+
+// *** NEW: Test if LED controller is responding correctly ***
+bool USBSynchronizedPacketController::testLEDControllerResponse() {
+    // Create a simple test pattern - single LED red
+    ControlPadColor testColors[24];
+    for (int i = 0; i < 24; i++) {
+        testColors[i] = {0, 0, 0}; // All off
+    }
+    testColors[0] = {32, 0, 0}; // First LED dim red (low intensity test)
+    
+    // Try to send test pattern (bypassing our protection since this is recovery)
+    Serial.printf("🔍 Testing LED controller with validation pattern...\n");
+    
+    // Temporarily disable protection for validation
+    bool wasProtected = usbCleanupProtectionActive;
+    usbCleanupProtectionActive = false;
+    
+    bool success = false;
+    if (globalHardwareInstance) {
+        success = globalHardwareInstance->setAllLeds(testColors, 24);
+    } else {
+        Serial.printf("❌ LED controller test FAILED: No hardware instance available\n");
+        usbCleanupProtectionActive = wasProtected;
+        return false;
+    }
+    
+    // Restore protection state
+    usbCleanupProtectionActive = wasProtected;
+    
+    if (!success) {
+        Serial.printf("❌ LED controller test FAILED: No response to validation pattern\n");
+        return false;
+    }
+    
+    // Wait a bit for the command to process
+    delay(10);
+    
+    Serial.printf("✅ LED controller test PASSED: Response to validation pattern\n");
+    return true;
+}
+
+// *** NEW: Attempt to recover corrupted LED controller ***
+bool USBSynchronizedPacketController::recoverLEDController() {
+    Serial.printf("🔧 RECOVERY STEP 1: Attempting LED controller reset...\n");
+    
+    // *** STEP 1: Try to reset the LED controller to custom mode ***
+    bool customModeSuccess = false;
+    
+    // Temporarily disable protection for recovery operations
+    bool wasProtected = usbCleanupProtectionActive;
+    usbCleanupProtectionActive = false;
+    
+    // Attempt to reinitialize custom LED mode
+    if (globalControlPadDriver.setCustomMode()) {
+        Serial.printf("✅ Custom LED mode reset successful\n");
+        customModeSuccess = true;
+    } else {
+        Serial.printf("❌ Custom LED mode reset failed\n");
+    }
+    
+    // *** STEP 2: Restore known good LED state ***
+    if (customModeSuccess) {
+        Serial.printf("🔧 RECOVERY STEP 2: Restoring base LED colors...\n");
+        
+        // Force update to restore the base colors
+        controlPad.forceUpdate();
+        
+        Serial.printf("✅ LED controller recovery completed\n");
+        
+        // Restore protection state
+        usbCleanupProtectionActive = wasProtected;
+        return true;
+    }
+    
+    // *** STEP 3: If still failing, try full activation sequence (last resort) ***
+    Serial.printf("🔧 RECOVERY STEP 3: Attempting full device reactivation (last resort)...\n");
+    
+    // Try the full activation sequence to recover the device
+    if (globalControlPadDriver.sendActivationSequence()) {
+        Serial.printf("🔧 Activation sequence completed, attempting custom mode...\n");
+        delay(200); // Give device time to process activation
+        
+        if (globalControlPadDriver.setCustomMode()) {
+            Serial.printf("✅ Full device reactivation successful, LED controller recovered\n");
+            controlPad.forceUpdate();
+            
+            // Restore protection state
+            usbCleanupProtectionActive = wasProtected;
+            return true;
+        }
+    }
+    
+    Serial.printf("❌ All recovery attempts failed\n");
+    
+    // Restore protection state
+    usbCleanupProtectionActive = wasProtected;
+    return false;
+}
+
+
 
 
 

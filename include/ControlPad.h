@@ -75,6 +75,11 @@ public:
     void updateButtonHighlights();
     void updateUnifiedLEDs();
     bool isAnimationEnabled() const;
+    
+    // MIDI-timed LED system support
+    ControlPadColor getCurrentLedColor(uint8_t index) const;
+    bool isConnected() const;
+    bool sendRawPacket(const uint8_t* data, size_t length);
 
     // Event API
     bool pollEvent(ControlPadEvent& event); // Polling
