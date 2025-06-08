@@ -52,6 +52,13 @@ void loop() {
     // Still process USB events to keep the connection alive
     controlPad.poll();
     
+    // Debug: Check if main loop is running
+    static unsigned long lastDebugTime = 0;
+    if (millis() - lastDebugTime > 5000) {
+        lastDebugTime = millis();
+        Serial.println("🟢 Main loop is running");
+    }
+    
     // Process any real button events (optional - you can disable this if you want only the loop)
     ControlPadEvent event;
     while (controlPad.pollEvent(event)) {
@@ -70,7 +77,7 @@ void loop() {
     
     unsigned long currentTime = millis();
     
-    // Change highlight every 500ms (adjust this timing as needed)
+    // Change highlight every 100ms (was 500ms in comment)
     if (currentTime - lastHighlightTime >= 100) {
         lastHighlightTime = currentTime;
         
