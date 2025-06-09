@@ -171,7 +171,30 @@ void manualEndpointFlush() {
 
 // Resource-based monitoring instead of transfer counting
 void preventiveTransferManagement() {
-    globalTransferCounter++;
+    // Transfer counter now incremented in main loop to avoid circular dependency
+    // globalTransferCounter++; // REMOVED - now handled in main loop
+    
+    // REAL FLICKERING DETECTION - Monitor around T#2615 where actual issues occur
+    if (globalTransferCounter >= 2500 && globalTransferCounter <= 2800) {
+        static uint32_t lastHighTransferCheck = 0;
+        uint32_t currentTime = millis();
+        
+        if (currentTime - lastHighTransferCheck >= 1000) { // Every second in danger zone
+            lastHighTransferCheck = currentTime;
+            
+            // Monitor USB controller status more intensively in real problem zone
+            uint32_t usbsts = USB1_USBSTS;
+            uint32_t usbcmd = USB1_USBCMD;
+            
+            Serial.printf("🚨 HIGH TRANSFER ZONE [T#%lu]: USBSTS=0x%08X, USBCMD=0x%08X, Time=+%lus\n", 
+                         globalTransferCounter, usbsts, usbcmd, currentTime / 1000);
+            
+            // Check for resource exhaustion signs
+            if (usbsts & USB_USBSTS_UEI) {
+                Serial.printf("🔥 USB ERROR in high transfer zone at T#%lu!\n", globalTransferCounter);
+            }
+        }
+    }
     
     // Monitor system resources that might trigger cleanup
     static uint32_t lastResourceCheck = 0;
@@ -183,7 +206,6 @@ void preventiveTransferManagement() {
         
         // Check USB controller status for resource exhaustion signs
         uint32_t usbsts = USB1_USBSTS;
-        uint32_t usbcmd = USB1_USBCMD;
         
         // Look for signs of resource pressure
         bool resourcePressure = false;
@@ -212,14 +234,14 @@ void preventiveTransferManagement() {
         Serial.printf("📊 STABILITY: #%lu transfers completed\n", globalTransferCounter);
     }
     
-    // Special warnings as we approach the suspected cleanup range
-    if (globalTransferCounter == 1400) {
-        Serial.println("🚨 APPROACHING SUSPECTED CLEANUP ZONE - Transfer 1400 reached!");
-        Serial.println("🔍 Watch for status changes around transfer 1600...");
+    // Special warnings as we approach the REAL problem zone (based on T#2615 observation)
+    if (globalTransferCounter == 2500) {
+        Serial.println("🚨 ENTERING REAL FLICKERING ZONE - Transfer 2500 reached!");
+        Serial.println("🔍 Watch for actual USB issues around transfer 2615...");
     }
-    if (globalTransferCounter == 2100) {
-        Serial.println("🎯 ENTERING CLEANUP STABILIZATION ZONE - Transfer 2100 reached!");
-        Serial.println("🔍 Monitoring for cleanup completion around transfer 2180...");
+    if (globalTransferCounter == 2700) {
+        Serial.println("⚠️ CRITICAL ZONE - Transfer 2700 reached!");
+        Serial.println("🔍 This is where real problems typically manifest...");
     }
 }
 
@@ -591,6 +613,17 @@ void monitorUSBStability() {
     static bool lastConnectionState = false;
     uint32_t currentTime = millis();
     
+    // TARGETED MONITORING: Watch for the real USB issue around T#2615
+    if (globalTransferCounter >= 2600 && globalTransferCounter <= 2650) {
+        static uint32_t lastTargetedCheck = 0;
+        
+        if (currentTime - lastTargetedCheck >= 1000) {
+            lastTargetedCheck = currentTime;
+            Serial.printf("🎯 TARGET MONITORING [T#%lu]: Watching for genuine USB issues (not monitoring-induced)\n", 
+                         globalTransferCounter);
+        }
+    }
+    
     // Check USB stability every 2 seconds
     if (currentTime - lastStabilityCheck >= 2000) {
         lastStabilityCheck = currentTime;
@@ -633,6 +666,7 @@ enum PerformanceTestMode {
     TEST_COMBINED_HEAVY      // Heavy version of all operations
 };
 
+// Current test state - was missing!
 static PerformanceTestMode currentTestMode = TEST_NONE;
 static uint32_t testModeStartTime = 0;
 static uint32_t testModeStartTransfer = 0;
@@ -643,6 +677,10 @@ static uint32_t baselineTransferTime = 0;
 static uint32_t slowTransferCount = 0;
 static uint32_t totalTransferTime = 0;
 static uint32_t transferTimeCount = 0;
+
+// NON-BLOCKING test start timing
+static uint32_t testStartTimer = 0;
+static bool testStartScheduled = false;
 
 // Getter function for baseline transfer time
 uint32_t getBaselineTransferTime() {
@@ -829,30 +867,46 @@ void measureTransferPerformance(uint32_t transferTime) {
         if (currentBaseline > 0 && transferTime > (currentBaseline * 2)) {
             slowTransferCount++;
         }
-    } else if (getBaselineTransferTime() == 0 && globalTransferCounter > 50) {
-        // Establish baseline during normal operation
+    }
+    
+    // DEBUG: Show what's happening with baseline establishment
+    if ((globalTransferCounter % 50) == 0 && globalTransferCounter > 100) {
+        Serial.printf("🔧 DEBUG: Transfer #%lu, Baseline=%lu, Condition check: getBaseline==0 %s, counter>150 %s\n", 
+                     globalTransferCounter, getBaselineTransferTime(),
+                     (getBaselineTransferTime() == 0) ? "TRUE" : "FALSE",
+                     (globalTransferCounter > 150) ? "TRUE" : "FALSE");
+    }
+    
+    // SIMPLIFIED: Establish baseline after activation grace period (100+ transfers)
+    if (getBaselineTransferTime() == 0 && globalTransferCounter > 150) {
         static uint32_t baselineSum = 0;
         static uint32_t baselineCount = 0;
+        static bool testsStarted = false;
         
         baselineSum += transferTime;
         baselineCount++;
         
-        // Debug output for baseline establishment
-        if (baselineCount <= 5 || baselineCount % 5 == 0) {
-            Serial.printf("🔧 BASELINE PROGRESS: %lu/%lu measurements, current avg: %lu μs\n", 
-                         baselineCount, 20UL, baselineSum / baselineCount);
+        // Debug output for baseline establishment  
+        if (baselineCount <= 10 || baselineCount % 10 == 0) {
+            Serial.printf("🔧 BASELINE: %lu/%lu measurements, avg: %lu μs [T#%lu]\n", 
+                         baselineCount, 20UL, baselineSum / baselineCount, globalTransferCounter);
         }
         
-        if (baselineCount >= 20) {
+        if (baselineCount >= 20 && !testsStarted) {
+            testsStarted = true;
             uint32_t avgBaseline = baselineSum / baselineCount;
             setBaselineTransferTime(avgBaseline);
             Serial.println("\n" + String("*").substring(0, 60));
             Serial.printf("📊 BASELINE ESTABLISHED: %lu μs per transfer\n", avgBaseline);
-            Serial.printf("🎯 Based on %lu transfer measurements\n", baselineCount);
+            Serial.printf("🎯 Based on %lu transfer measurements (T#%lu)\n", baselineCount, globalTransferCounter);
             Serial.println("🧪 Starting performance testing sequence in 5 seconds...");
             Serial.println(String("*").substring(0, 60) + "\n");
-            delay(5000);
-            startPerformanceTest(TEST_SERIAL_FLOOD);
+            
+            // NON-BLOCKING: Set timer for test start instead of blocking delay
+            testStartTimer = millis() + 5000; // Start tests 5 seconds from now
+            testStartScheduled = true;
+            Serial.printf("🔧 DEBUG: Test timer set to %lu, testStartScheduled=%s\n", 
+                         testStartTimer, testStartScheduled ? "TRUE" : "FALSE");
         }
     }
 }
@@ -863,6 +917,11 @@ void setup() {
     
     // Initialize system timing for background operation tracking
     systemStartTime = millis();
+    
+    // FORCE BASELINE RESET - Ensure baseline establishment runs properly
+    baselineTransferTime = 0;
+    testStartScheduled = false;
+    currentTestMode = TEST_NONE;
     
     Serial.println("🚀 ControlPad Combined Package Test - Maximum LED Speed!");
     Serial.println("🧪 PERFORMANCE IMPACT ANALYSIS - Testing what causes USB interference");
@@ -876,6 +935,10 @@ void setup() {
     }
     
     Serial.println("✅ ControlPad initialized successfully!");
+    
+    // CRITICAL: Wait for activation sequence to complete before any LED operations
+    Serial.println("⏳ Waiting for USB activation to complete...");
+    delay(2000); // Give activation sequence time to complete
     
     // Disable smart updates - we want immediate LED updates for responsiveness
     controlPad.enableSmartUpdates(false);
@@ -901,7 +964,7 @@ void setup() {
     controlPad.forceUpdate();
     
     // Skip aggressive cleanup during initialization to prevent USB instability
-    Serial.println("🎯 Skipping initial cleanup to maintain USB stability...");
+    Serial.println("🎯 LED initialization complete!");
     
     Serial.println("✅ Initial colors set and updated!");
     Serial.println("🎮 Ready for button events - press buttons to see WHITE highlighting!");
@@ -911,18 +974,58 @@ void setup() {
 }
 
 void loop() {
+    // ===== ACTIVATION GRACE PERIOD =====
+    // CRITICAL: Disable ALL monitoring during first 100 transfers for clean USB activation
+    static bool activationGracePeriod = true;
+    if (activationGracePeriod && globalTransferCounter >= 100) {
+        activationGracePeriod = false;
+        Serial.println("\n🎯 ACTIVATION GRACE PERIOD COMPLETE - Enabling monitoring systems");
+        Serial.printf("📊 Activation completed successfully after %lu transfers\n", globalTransferCounter);
+        Serial.println("🔧 Starting monitoring and performance systems...\n");
+    }
+    
     // ===== USB STABILITY MONITORING =====
-    // Monitor USB stability and activation issues
-    monitorUSBStability();
+    // Monitor USB stability and activation issues (ONLY after grace period)
+    if (!activationGracePeriod) {
+        monitorUSBStability();
+    }
+    
+    // ===== SIMPLIFIED PERFORMANCE TESTING =====
+    // Start tests immediately after grace period without complex baseline logic
+    if (!activationGracePeriod) {
+        static bool testsStarted = false;
+        static uint32_t testStartTime = 0;
+        
+        if (!testsStarted) {
+            testsStarted = true;
+            testStartTime = millis();
+            Serial.println("\n🎯 GRACE PERIOD COMPLETE - Starting simplified test sequence!");
+            Serial.println("⏰ Will start first test in 3 seconds...");
+        }
+        
+        // Start first test after 3 seconds
+        if (testsStarted && millis() - testStartTime >= 3000) {
+            static bool firstTestStarted = false;
+            if (!firstTestStarted) {
+                firstTestStarted = true;
+                Serial.println("🚀 Starting first performance test NOW!");
+                startPerformanceTest(TEST_SERIAL_FLOOD);
+            }
+        }
+        
+        runPerformanceTest();
+    }
     
     // Still process USB events to keep the connection alive
     controlPad.poll();
     
-    // Debug: Check if main loop is running
-    static unsigned long lastDebugTime = 0;
-    if (millis() - lastDebugTime > 5000) {
-        lastDebugTime = millis();
-        Serial.println("🟢 Main loop is running - Memory management active");
+    // Debug: Check if main loop is running (ONLY after grace period)
+    if (!activationGracePeriod) {
+        static unsigned long lastDebugTime = 0;
+        if (millis() - lastDebugTime > 5000) {
+            lastDebugTime = millis();
+            Serial.println("🟢 Main loop is running - Memory management active");
+        }
     }
     
     // Process any real button events (optional - you can disable this if you want only the loop)
@@ -950,7 +1053,7 @@ void loop() {
         if (!highlightState) {
             // Turn OFF the previous button's highlight
             if (currentHighlightButton > 0) {
-                controlPad.setButtonHighlight(currentHighlightButton - 1, false);
+                controlPad.setButtonHighlight(currentHighlightButton -1, false);
             } else {
                 // Wrap around - turn off button 23 when starting from button 0
                 controlPad.setButtonHighlight(23, false);
@@ -960,21 +1063,34 @@ void loop() {
             unsigned long highlightStartTime = micros();
             controlPad.setButtonHighlight(currentHighlightButton, true);
             unsigned long highlightEndTime = micros();
-            trackTransferAndCleanup(); // Track this transfer
+            
+            // ALWAYS increment transfer counter (even during grace period)
+            globalTransferCounter++;
+            
+            // ONLY track transfers after activation grace period
+            if (!activationGracePeriod) {
+                trackTransferAndCleanup(); // Track this transfer
+            }
             
             // Detect unusually slow LED updates (potential flickering)
             unsigned long highlightDuration = highlightEndTime - highlightStartTime;
-            monitorPerformanceDegradation(highlightDuration); // Track performance for cleanup detection
-            measureTransferPerformance(highlightDuration); // Track performance for testing
-            if (highlightDuration > 50000) { // More than 50ms is suspicious
+            
+            // ONLY monitor performance after activation grace period  
+            if (!activationGracePeriod) {
+                monitorPerformanceDegradation(highlightDuration); // Track performance for cleanup detection
+                measureTransferPerformance(highlightDuration); // Track performance for testing
+            }
+            if (!activationGracePeriod && highlightDuration > 50000) { // More than 50ms is suspicious
                 Serial.printf("⚠️ SLOW HIGHLIGHT: button %d took %lu μs [Transfer: %lu]\n", 
                              currentHighlightButton + 1, highlightDuration, globalTransferCounter);
             }
             
             // Highlighting button (removed print to clean up monitoring display)
             
-            // Monitor sequence state for desynchronization
-            monitorSequenceState(currentHighlightButton, true, highlightDuration);
+            // Monitor sequence state for desynchronization (ONLY after grace period)
+            if (!activationGracePeriod) {
+                monitorSequenceState(currentHighlightButton, true, highlightDuration);
+            }
             
             highlightState = true;
             highlightCounter++;
@@ -983,42 +1099,55 @@ void loop() {
             unsigned long unhighlightStartTime = micros();
             controlPad.setButtonHighlight(currentHighlightButton, false);
             unsigned long unhighlightEndTime = micros();
-            trackTransferAndCleanup(); // Track this transfer
+            
+            // ALWAYS increment transfer counter (even during grace period)
+            globalTransferCounter++;
+            
+            // ONLY track transfers after activation grace period
+            if (!activationGracePeriod) {
+                trackTransferAndCleanup(); // Track this transfer
+            }
             
             // Detect unusually slow LED updates (potential flickering)
             unsigned long unhighlightDuration = unhighlightEndTime - unhighlightStartTime;
-            monitorPerformanceDegradation(unhighlightDuration); // Track performance for cleanup detection
-            measureTransferPerformance(unhighlightDuration); // Track performance for testing
-            if (unhighlightDuration > 50000) { // More than 50ms is suspicious
+            
+            // ONLY monitor performance after activation grace period
+            if (!activationGracePeriod) {
+                monitorPerformanceDegradation(unhighlightDuration); // Track performance for cleanup detection
+                measureTransferPerformance(unhighlightDuration); // Track performance for testing
+            }
+            if (!activationGracePeriod && unhighlightDuration > 50000) { // More than 50ms is suspicious
                 Serial.printf("⚠️ SLOW UNHIGHLIGHT: button %d took %lu μs [Transfer: %lu]\n", 
                              currentHighlightButton + 1, unhighlightDuration, globalTransferCounter);
             }
             
             // Un-highlighting button (removed print to clean up monitoring display)
             
-            // Monitor sequence state for desynchronization
-            monitorSequenceState(currentHighlightButton, false, unhighlightDuration);
+            // Monitor sequence state for desynchronization (ONLY after grace period)
+            if (!activationGracePeriod) {
+                monitorSequenceState(currentHighlightButton, false, unhighlightDuration);
+            }
             
             // Move to the next button
-            uint8_t nextButton = (currentHighlightButton + 1) % 24;
+            uint8_t nextButton = (currentHighlightButton +1) % 24;
             
                          // CYCLE RESET: Add pause when wrapping from button 23 back to button 0
              // This prevents timing drift accumulation between cycles
-             if (currentHighlightButton == 23 && nextButton == 0) {
-                 passCounter++;
-                 Serial.printf("🔄 Pass %d completed: Wrapping from button 24 to button 1\n", passCounter);
+            //  if (currentHighlightButton == 24 && nextButton == 0) {
+            //      passCounter++;
+            //      Serial.printf("🔄 Pass %d completed: Wrapping from button 24 to button 1\n", passCounter);
                  
-                 // MINIMAL CYCLE MANAGEMENT: Reduce cleanup to prevent flickering
-                 if (passCounter % 5 == 0) {
-                     Serial.printf("🔄 LIGHT RESET: Pass %d - Minimal cleanup only\n", passCounter);
-                     // Just memory barriers, no heavy cleanup
-                     asm volatile("dsb" ::: "memory");
-                     delay(50); // Shorter pause to prevent timing drift
-        } else {
-                     Serial.printf("🔄 STANDARD RESET: Pass %d - Normal cycle break\n", passCounter);
-                     delay(25); // Reduced pause 
-                 }
-             }
+            //      // MINIMAL CYCLE MANAGEMENT: Reduce cleanup to prevent flickering
+            //     //  if (passCounter % 5 == 0) {
+            //     //      Serial.printf("🔄 LIGHT RESET: Pass %d - Minimal cleanup only\n", passCounter);
+            //     //      // Just memory barriers, no heavy cleanup
+            //     //      asm volatile("dsb" ::: "memory");
+            //     //      delay(50); // Shorter pause to prevent timing drift
+            //     //   } else {
+            //     //      Serial.printf("🔄 STANDARD RESET: Pass %d - Normal cycle break\n", passCounter);
+            //     //      delay(25); // Reduced pause 
+            //     //  }
+            //  }
             
             currentHighlightButton = nextButton;
             highlightState = false;
