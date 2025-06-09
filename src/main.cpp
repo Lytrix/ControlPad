@@ -21,7 +21,7 @@ static bool highlightState = false;  // false = OFF, true = ON
 
 // Hardware initialization state
 static bool hardwareInitialized = false;
-
+    
 // Transfer tracking for stability monitoring
 static uint32_t globalTransferCounter = 0;
 
@@ -136,13 +136,13 @@ void loop() {
             if (event.button.pressed) {
                 Serial.printf("🔵 Button %d PRESSED\n", event.button.button);
                 buttonPressed[event.button.button] = true;
-            } else {
+        } else {
                 Serial.printf("⚪ Button %d RELEASED\n", event.button.button);
                 buttonPressed[event.button.button] = false;
             }
         }
-    }
-    
+}
+
     // LED cycling - cycle every 300ms (slower to be less aggressive)
     if (millis() - lastHighlightTime >= 300) {
         lastHighlightTime = millis();
