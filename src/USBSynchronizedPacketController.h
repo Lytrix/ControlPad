@@ -52,6 +52,35 @@ public:
     bool testLEDControllerResponse();
     bool recoverLEDController();
 
+    // *** NEW: followup_Transfer Pattern Integration ***
+    void onTransferStarted(uint32_t transferId, const void* buffer, size_t length);
+    void onTransferCompleted(uint32_t transferId, bool success, uint32_t actualLength);
+    void onTransferError(uint32_t transferId, uint32_t errorCode, const char* errorDescription);
+    void performFollowupTransferCleanup(uint32_t transferId);
+    void performFollowupErrorRecovery(uint32_t transferId, uint32_t errorCode);
+    
+    // *** NEW: Transfer state tracking for proper cleanup ***
+    struct TransferState {
+        uint32_t transferId;
+        const void* buffer;
+        size_t length;
+        uint32_t startTime;
+        bool isActive;
+        uint32_t retryCount;
+    };
+    
+    static constexpr uint8_t MAX_TRACKED_TRANSFERS = 8;
+    TransferState activeTransfers[MAX_TRACKED_TRANSFERS];  // Made public for access
+    uint32_t nextTransferId = 1;
+    
+    // *** NEW: Memory cleanup state tracking ***
+    bool isFollowupCleanupActive();
+    void activateFollowupCleanupProtection(uint32_t transferId, const char* reason, uint32_t duration = 200);
+    
+    // *** NEW: Transfer timeout monitoring ***
+    void monitorTransferTimeouts();
+    static constexpr uint32_t TRANSFER_TIMEOUT_MS = 500; // 500ms timeout for transfers
+
 private:
 };
 

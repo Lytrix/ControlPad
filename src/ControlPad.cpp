@@ -1,12 +1,8 @@
 #include "ControlPad.h"
 #include "ControlPadHardware.h"
-#include "USBSynchronizedPacketController.h"
 #include <algorithm>
 
 ControlPadHardware* hw;
-
-// External reference to the global USB synchronization controller
-extern USBSynchronizedPacketController usbSyncController;
 
 ControlPad::ControlPad() {
     hw = nullptr;
@@ -200,45 +196,30 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
     
     // DIRECT ASSIGNMENT - No intermediate calculations
     if (pressed) {
-        // IMMEDIATE button press highlighting - no coordination delay
+        // Direct white highlight assignment for immediate visual feedback
         currentColors[buttonIndex] = {255, 255, 255};
-        Serial.printf("⚡ IMMEDIATE highlight for button %d press\n", buttonIndex + 1);
+        Serial.printf("🔥 Button %d PRESSED → WHITE highlighting\n", buttonIndex + 1);
     } else {
-        // Only coordinate button RELEASES to prevent flickering during restore
-        if (!usbSyncController.isSafeToSendPacket()) {
-            Serial.printf("🚫 Button %d release blocked by coordination - will retry\n", buttonIndex + 1);
-            // Mark LED as dirty so it will be sent when coordination allows
-            ledDirtyFlags[buttonIndex] = true;
-            ledsDirty = true;
-            return;
-        }
-        
-        // Restore base color with coordination
+        // Direct base color restore assignment - ensure we have valid base colors
         if (baseColors[buttonIndex].r == 0 && baseColors[buttonIndex].g == 0 && baseColors[buttonIndex].b == 0) {
-            baseColors[buttonIndex] = {64, 64, 64};  // Default base color
+            // Default base color if not set
+            baseColors[buttonIndex] = {64, 64, 64};
         }
         currentColors[buttonIndex] = baseColors[buttonIndex];
-        Serial.printf("⚡ COORDINATED restore for button %d release\n", buttonIndex + 1);
+        Serial.printf("⚡ Button %d RELEASED → Restored to RGB(%d,%d,%d)\n", 
+                     buttonIndex + 1, 
+                     currentColors[buttonIndex].r, 
+                     currentColors[buttonIndex].g, 
+                     currentColors[buttonIndex].b);
     }
     
-    // ⚡ LED UPDATE - Immediate for press, coordinated for release
+    // ⚡ SIMPLE IMMEDIATE LED UPDATE - No interrupt protection
+    // Trust that the USB timing will work with proper rate limiting
     if (hw) {
-        bool success = hw->setAllLeds(currentColors, CONTROLPAD_NUM_BUTTONS);
-        if (!success) {
-            // Don't block the main loop with delays - just log and continue
-            Serial.printf("⏭️ Button %d highlight deferred - async LED system busy (non-blocking)\n", buttonIndex + 1);
-            return;  // Will try again on next button event or poll cycle
-        }
-        
-        // Debug: Show first few colors being sent to hardware
-        Serial.printf("📤 %s: [0]=RGB(%d,%d,%d), [%d]=RGB(%d,%d,%d), [23]=RGB(%d,%d,%d)\n",
-                     pressed ? "Immediate press" : "Coordinated release",
-                     currentColors[0].r, currentColors[0].g, currentColors[0].b,
-                     buttonIndex, currentColors[buttonIndex].r, currentColors[buttonIndex].g, currentColors[buttonIndex].b,
-                     currentColors[23].r, currentColors[23].g, currentColors[23].b);
+        hw->setAllLeds(currentColors, CONTROLPAD_NUM_BUTTONS);
     }
     
-    // Mark as clean since update was successfully queued
+    // Mark as clean since we just updated
     ledsDirty = false;
 }
 
@@ -307,15 +288,13 @@ void ControlPad::setUpdateInterval(unsigned long intervalMs) {
 
 void ControlPad::enableInstantUpdates(bool instant) {
     if (instant) {
-        updateInterval = 10; // Very fast updates with new package structure
+        updateInterval = 25; // Faster updates but still safe for USB ACK timing
     } else {
-        updateInterval = 30; // Standard safe rate limiting
+        updateInterval = 50; // Standard safe rate limiting
     }
 }
 
 void ControlPad::forceUpdate() {
-    Serial.printf("🚀 forceUpdate: Called - hw=%p, ledUpdateInProgress=%s\n", hw, ledUpdateInProgress ? "true" : "false");
-    
     if (!hw || ledUpdateInProgress) {
         Serial.println("🚫 forceUpdate: Skipped (no hardware or update in progress)");
         return;
@@ -343,22 +322,11 @@ void ControlPad::forceUpdate() {
         }
     }
     
-    Serial.printf("🎨 forceUpdate: hasChanges=%s, dirty count=%d\n", 
-                 hasChanges ? "true" : "false",
-                 (int)std::count(ledDirtyFlags, ledDirtyFlags + CONTROLPAD_NUM_BUTTONS, true));
-    
-    // DEBUG: Show first few colors being sent
-    Serial.printf("🎨 forceUpdate: Colors[0]=RGB(%d,%d,%d), Colors[1]=RGB(%d,%d,%d)\n",
-                 tempState[0].r, tempState[0].g, tempState[0].b,
-                 tempState[1].r, tempState[1].g, tempState[1].b);
-    
     // Send complete state to hardware atomically
     if (hasChanges) {
         Serial.printf("🎨 forceUpdate: Sending %d LED changes to hardware\n", 
                      (int)std::count(ledDirtyFlags, ledDirtyFlags + CONTROLPAD_NUM_BUTTONS, true));
-        
-        bool hwResult = hw->setAllLeds(tempState, CONTROLPAD_NUM_BUTTONS);
-        Serial.printf("🎨 forceUpdate: Hardware setAllLeds result: %s\n", hwResult ? "SUCCESS" : "FAILED");
+        hw->setAllLeds(tempState, CONTROLPAD_NUM_BUTTONS);
         
         // Only clear flags AFTER successful hardware update
         for (uint8_t i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
@@ -393,15 +361,15 @@ void ControlPad::updateSmartLeds() {
     static unsigned long lastUSBActivityTime = 0;
     static bool needsQuietTime = false;
     
-    // Require quiet period after button events before LED updates
-    const unsigned long USB_QUIET_TIME_REQUIRED = 50; // Reduced to 50ms with new package structure
-    
     // Only set quiet time requirement on FIRST call with dirty LEDs
     if (ledsDirty && !needsQuietTime) {
         lastUSBActivityTime = currentTime; // Mark when we first detected dirty LEDs
         needsQuietTime = true; // Flag that we need to wait for quiet time
-        Serial.printf("🎯 First dirty LED detected - starting %lums quiet time countdown\n", (unsigned long)USB_QUIET_TIME_REQUIRED);
+        Serial.printf("🎯 First dirty LED detected - starting %lums quiet time countdown\n", (unsigned long)200);
     }
+    
+    // Require quiet period after button events before LED updates
+    const unsigned long USB_QUIET_TIME_REQUIRED = 200; // 200ms quiet time
     unsigned long timeSinceUSBActivity = currentTime - lastUSBActivityTime;
     
     // Check if we still need to wait for quiet time
@@ -419,8 +387,8 @@ void ControlPad::updateSmartLeds() {
     
     Serial.println("🎨 updateSmartLeds: Starting LED update after USB quiet period");
     
-    // Brief pre-delay to ensure USB is quiet
-    delay(10);
+    // Add aggressive pre-delay to ensure USB is completely quiet
+    delay(50);
     
     // ATOMIC UPDATE: Build complete state first, then send all at once
     bool hasChanges = false;
@@ -445,8 +413,8 @@ void ControlPad::updateSmartLeds() {
                      (int)std::count(ledDirtyFlags, ledDirtyFlags + CONTROLPAD_NUM_BUTTONS, true));
         hw->setAllLeds(tempState, CONTROLPAD_NUM_BUTTONS);
         
-        // Brief post-delay to let LED communication settle
-        delay(25);
+        // Add aggressive post-delay to let LED communication settle completely
+        delay(100);
         
         // Only clear flags AFTER successful hardware update
         for (uint8_t i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
@@ -478,34 +446,10 @@ void ControlPad::markLedsClean() {
     ledsDirty = false;
 }
 
-// *** ANIMATION CONTROL METHODS ***
+// Methods that delegate to hardware layer
 void ControlPad::enableAnimation() {
     if (hw) {
         hw->enableAnimation();
-    }
-}
-
-void ControlPad::disableAnimation() {
-    if (hw) {
-        hw->disableAnimation();
-    }
-}
-
-void ControlPad::updateAnimation() {
-    if (hw) {
-        hw->updateAnimation();
-    }
-}
-
-void ControlPad::updateButtonHighlights() {
-    if (hw) {
-        hw->updateButtonHighlights();
-    }
-}
-
-void ControlPad::updateUnifiedLEDs() {
-    if (hw) {
-        hw->updateUnifiedLEDs();
     }
 }
 
@@ -516,30 +460,9 @@ bool ControlPad::isAnimationEnabled() const {
     return false;
 }
 
-// *** MIDI-TIMED LED SYSTEM SUPPORT METHODS ***
-ControlPadColor ControlPad::getCurrentLedColor(uint8_t index) const {
-    if (index < CONTROLPAD_NUM_BUTTONS) {
-        // Return the current color state (including highlights)
-        ControlPadColor color = currentColors[index];
-        // Debug: Only log occasionally to avoid spam
-        if (index == 0) {
-            Serial.printf("🔍 getCurrentLedColor[%d]: RGB(%d,%d,%d)\n", index, color.r, color.g, color.b);
-        }
-        return color;
-    }
-    return {0, 0, 0};  // Default to off if invalid index
-}
-
 bool ControlPad::isConnected() const {
     if (hw) {
         return hw->isConnected();
-    }
-    return false;
-}
-
-bool ControlPad::sendRawPacket(const uint8_t* data, size_t length) {
-    if (hw) {
-        return hw->sendRawPacket(data, length);
     }
     return false;
 }
