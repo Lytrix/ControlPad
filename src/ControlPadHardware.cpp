@@ -369,20 +369,41 @@ bool USBControlPad::sendUSBInterfaceReSponseActivation() {
         return false;
     }
     
-    // Send Activation startup sequence 
-    sendActivationCommandsForInterface(1, "42 00 activation packet 1/2");
-    sendActivationCommandsForInterface(2, "42 10 activation packet 2/2");
-    sendActivationCommandsForInterface(3, "43 00 activation status");
-    sendActivationCommandsForInterface(4, "41 80 finalize activation");
-    sendActivationCommandsForInterface(5, "52 00 activate effect modes");
-    sendActivationCommandsForInterface(6, "41 80 repeat");
-    sendActivationCommandsForInterface(7, "52 00 final");
+    // ROBUST ACTIVATION: Longer delays for stable USB enumeration
+    Serial.println("🚀 Starting robust activation sequence...");
+    delay(200);  // Initial settling time
+    
+    // Send Activation startup sequence with success tracking
+    bool overallSuccess = true;
+    
+    overallSuccess &= sendActivationCommandsForInterface(1, "42 00 activation packet 1/2");
+    delay(150); 
+    overallSuccess &= sendActivationCommandsForInterface(2, "42 10 activation packet 2/2");
+    delay(150); 
+    overallSuccess &= sendActivationCommandsForInterface(3, "43 00 activation status");
+    delay(150); 
+    overallSuccess &= sendActivationCommandsForInterface(4, "41 80 finalize activation");
+    delay(150); 
+    overallSuccess &= sendActivationCommandsForInterface(5, "52 00 activate effect modes");
+    delay(150); 
+    overallSuccess &= sendActivationCommandsForInterface(6, "41 80 repeat");
+    delay(150);
+    overallSuccess &= sendActivationCommandsForInterface(7, "52 00 final");
+    
+    if (overallSuccess) {
+        Serial.println("✅ Activation sequence completed successfully");
+    } else {
+        Serial.println("⚠️ Activation sequence had some errors but continuing");
+    }
+    
+    delay(500);  // Let activation settle
     
     // Set custom mode ONCE during startup - not needed for every button press
     Serial.println("🎨 Setting custom LED mode for startup");
     setCustomMode();
-    delay(1);
-    return true;
+    delay(100);
+    
+    return true;  // Always return true since the device works even with some activation errors
 }
 
 bool USBControlPad::sendActivationCommandsForInterface(int step, const char* description) {
@@ -435,22 +456,30 @@ bool USBControlPad::sendActivationCommandsForInterface(int step, const char* des
         return false;
     }
     
-    // Send command with appropriate verification based on command type
+    // ROBUST ACTIVATION: Send command directly without verification for stability
+    // During initialization, the device may not respond reliably to echoes
     uint8_t* cmd = commands[step-1];
-    uint8_t expectedEcho1 = cmd[0];  // First byte should be echoed back
-    uint8_t expectedEcho2 = cmd[1];  // Second byte should be echoed back
+    uint8_t expectedEcho1 = cmd[0];  // For logging purposes only
+    uint8_t expectedEcho2 = cmd[1];  // For logging purposes only
     
-    bool success = sendCommandWithVerification(cmd, 64, expectedEcho1, expectedEcho2);
+    // Send the command directly using the robust sendCommand method
+    bool success = sendCommand(cmd, 64);
     
-    if (!success) {
-        Serial.printf("❌ Activation command %02X %02X failed verification - retrying\n", expectedEcho1, expectedEcho2);
-        // Fallback to sendCommand() which includes mutex protection
-        return sendCommand(cmd, 64);
+    if (success) {
+        Serial.printf("✅ Activation command %02X %02X sent successfully\n", expectedEcho1, expectedEcho2);
+    } else {
+        Serial.printf("⚠️ Activation command %02X %02X send failed (will retry)\n", expectedEcho1, expectedEcho2);
+        // Try one more time with a brief delay
+        delay(50);
+        success = sendCommand(cmd, 64);
+        if (success) {
+            Serial.printf("✅ Activation command %02X %02X retry successful\n", expectedEcho1, expectedEcho2);
+        } else {
+            Serial.printf("❌ Activation command %02X %02X retry failed\n", expectedEcho1, expectedEcho2);
+        }
     }
     
-    Serial.printf("✅ Activation command %02X %02X verified\n", expectedEcho1, expectedEcho2);
-    delay(25);  // Reduced delay since verification already handled timing
-    return true;
+    return success;
 }
 
 // ===== LED CONTROL COMMANDS =====
