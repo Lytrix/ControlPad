@@ -235,12 +235,9 @@ void USBControlPad::ctrl_poll(int result) {
                 goto restart_polling; // Skip invalid states
             }
             
-            // Skip spurious USB ID 0x00
-            if (buttonId == 0x00) {
-                goto restart_polling;
-            }
+            // Note: buttonId=0 is valid (physical button 1)
             
-            if (buttonId >= 1 && buttonId <= 24) {  // Valid button range 1-24
+            if (buttonId >= 0 && buttonId <= 23) {  // USB sends vertical indices 0-23 directly
                 // CRITICAL FIX: ONLY QUEUE EVENTS IN INTERRUPT CONTEXT
                 // Remove all direct LED processing to prevent USB timing conflicts
                 
@@ -606,23 +603,24 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     };
     
     size_t pos = 24;
-    // Column 1: buttons 1,6,11,16,21 (indices 0,5,10,15,20)
-    cmd1[pos++] = colors[0].r;   cmd1[pos++] = colors[0].g;   cmd1[pos++] = colors[0].b;
-    cmd1[pos++] = colors[5].r;   cmd1[pos++] = colors[5].g;   cmd1[pos++] = colors[5].b;
-    cmd1[pos++] = colors[10].r;  cmd1[pos++] = colors[10].g;  cmd1[pos++] = colors[10].b;
-    cmd1[pos++] = colors[15].r;  cmd1[pos++] = colors[15].g;  cmd1[pos++] = colors[15].b;
-    cmd1[pos++] = colors[20].r;  cmd1[pos++] = colors[20].g;  cmd1[pos++] = colors[20].b;
-    // Column 2: buttons 2,7,12,17,22 (indices 1,6,11,16,21)
-    cmd1[pos++] = colors[1].r;   cmd1[pos++] = colors[1].g;   cmd1[pos++] = colors[1].b;
-    cmd1[pos++] = colors[6].r;   cmd1[pos++] = colors[6].g;   cmd1[pos++] = colors[6].b;
-    cmd1[pos++] = colors[11].r;  cmd1[pos++] = colors[11].g;  cmd1[pos++] = colors[11].b;
-    cmd1[pos++] = colors[16].r;  cmd1[pos++] = colors[16].g;  cmd1[pos++] = colors[16].b;
-    cmd1[pos++] = colors[21].r;  cmd1[pos++] = colors[21].g;  cmd1[pos++] = colors[21].b;
-    // Column 3: buttons 3,8,13 (indices 2,7,12)
-    cmd1[pos++] = colors[2].r;   cmd1[pos++] = colors[2].g;   cmd1[pos++] = colors[2].b;
-    cmd1[pos++] = colors[7].r;   cmd1[pos++] = colors[7].g;   cmd1[pos++] = colors[7].b;
-    cmd1[pos++] = colors[12].r;  cmd1[pos++] = colors[12].g;  cmd1[pos++] = colors[12].b;
-    cmd1[pos++] = colors[17].r;  // Button 18 R
+    // Colors array is in PHYSICAL order (0-23), reorganize to vertical for USB transmission
+    // Column 1: buttons 1,6,11,16,21 (physical indices 0,5,10,15,20)
+    cmd1[pos++] = colors[0].r;   cmd1[pos++] = colors[0].g;   cmd1[pos++] = colors[0].b;   // Button 1
+    cmd1[pos++] = colors[5].r;   cmd1[pos++] = colors[5].g;   cmd1[pos++] = colors[5].b;   // Button 6
+    cmd1[pos++] = colors[10].r;  cmd1[pos++] = colors[10].g;  cmd1[pos++] = colors[10].b;  // Button 11
+    cmd1[pos++] = colors[15].r;  cmd1[pos++] = colors[15].g;  cmd1[pos++] = colors[15].b;  // Button 16
+    cmd1[pos++] = colors[20].r;  cmd1[pos++] = colors[20].g;  cmd1[pos++] = colors[20].b;  // Button 21
+    // Column 2: buttons 2,7,12,17,22 (physical indices 1,6,11,16,21)
+    cmd1[pos++] = colors[1].r;   cmd1[pos++] = colors[1].g;   cmd1[pos++] = colors[1].b;   // Button 2
+    cmd1[pos++] = colors[6].r;   cmd1[pos++] = colors[6].g;   cmd1[pos++] = colors[6].b;   // Button 7
+    cmd1[pos++] = colors[11].r;  cmd1[pos++] = colors[11].g;  cmd1[pos++] = colors[11].b;  // Button 12
+    cmd1[pos++] = colors[16].r;  cmd1[pos++] = colors[16].g;  cmd1[pos++] = colors[16].b;  // Button 17
+    cmd1[pos++] = colors[21].r;  cmd1[pos++] = colors[21].g;  cmd1[pos++] = colors[21].b;  // Button 22
+    // Column 3: buttons 3,8,13 (physical indices 2,7,12)
+    cmd1[pos++] = colors[2].r;   cmd1[pos++] = colors[2].g;   cmd1[pos++] = colors[2].b;   // Button 3
+    cmd1[pos++] = colors[7].r;   cmd1[pos++] = colors[7].g;   cmd1[pos++] = colors[7].b;   // Button 8
+    cmd1[pos++] = colors[12].r;  cmd1[pos++] = colors[12].g;  cmd1[pos++] = colors[12].b;  // Button 13
+    cmd1[pos++] = colors[17].r;  // Button 18 R component
     
     // Package 2
     uint8_t cmd2[64] = {0x56, 0x83, 0x01};
@@ -630,18 +628,18 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     cmd2[pos++] = 0x00;  // Padding
     cmd2[pos++] = colors[17].g;  // Button 18 G
     cmd2[pos++] = colors[17].b;  // Button 18 B
-    cmd2[pos++] = colors[22].r; cmd2[pos++] = colors[22].g; cmd2[pos++] = colors[22].b;
-    // Column 4: buttons 4,9,14,19,24 (indices 3,8,13,18,23)
-    cmd2[pos++] = colors[3].r;   cmd2[pos++] = colors[3].g;   cmd2[pos++] = colors[3].b;
-    cmd2[pos++] = colors[8].r;   cmd2[pos++] = colors[8].g;   cmd2[pos++] = colors[8].b;
-    cmd2[pos++] = colors[13].r;  cmd2[pos++] = colors[13].g;  cmd2[pos++] = colors[13].b;
-    cmd2[pos++] = colors[18].r;  cmd2[pos++] = colors[18].g;  cmd2[pos++] = colors[18].b;
-    cmd2[pos++] = colors[23].r;  cmd2[pos++] = colors[23].g;  cmd2[pos++] = colors[23].b;
-    // Column 5: buttons 5,10,15,20 (indices 4,9,14,19)
-    cmd2[pos++] = colors[4].r;   cmd2[pos++] = colors[4].g;   cmd2[pos++] = colors[4].b;
-    cmd2[pos++] = colors[9].r;   cmd2[pos++] = colors[9].g;   cmd2[pos++] = colors[9].b;
-    cmd2[pos++] = colors[14].r;  cmd2[pos++] = colors[14].g;  cmd2[pos++] = colors[14].b;
-    cmd2[pos++] = colors[19].r;  cmd2[pos++] = colors[19].g;  cmd2[pos++] = colors[19].b;
+    cmd2[pos++] = colors[22].r; cmd2[pos++] = colors[22].g; cmd2[pos++] = colors[22].b;  // Button 23
+    // Column 4: buttons 4,9,14,19,24 (physical indices 3,8,13,18,23)
+    cmd2[pos++] = colors[3].r;   cmd2[pos++] = colors[3].g;   cmd2[pos++] = colors[3].b;   // Button 4
+    cmd2[pos++] = colors[8].r;   cmd2[pos++] = colors[8].g;   cmd2[pos++] = colors[8].b;   // Button 9
+    cmd2[pos++] = colors[13].r;  cmd2[pos++] = colors[13].g;  cmd2[pos++] = colors[13].b;  // Button 14
+    cmd2[pos++] = colors[18].r;  cmd2[pos++] = colors[18].g;  cmd2[pos++] = colors[18].b;  // Button 19
+    cmd2[pos++] = colors[23].r;  cmd2[pos++] = colors[23].g;  cmd2[pos++] = colors[23].b;  // Button 24
+    // Column 5: buttons 5,10,15,20 (physical indices 4,9,14,19)
+    cmd2[pos++] = colors[4].r;   cmd2[pos++] = colors[4].g;   cmd2[pos++] = colors[4].b;   // Button 5
+    cmd2[pos++] = colors[9].r;   cmd2[pos++] = colors[9].g;   cmd2[pos++] = colors[9].b;   // Button 10
+    cmd2[pos++] = colors[14].r;  cmd2[pos++] = colors[14].g;  cmd2[pos++] = colors[14].b;  // Button 15
+    cmd2[pos++] = colors[19].r;  cmd2[pos++] = colors[19].g;  cmd2[pos++] = colors[19].b;  // Button 20
     
     // Apply command
     uint8_t cmd3[64] = {0x41, 0x80};
@@ -909,12 +907,19 @@ void ControlPadHardware::poll() {
             uint8_t buttonId = rawEvent.data[5];  // USB button ID (1-24) - now at data[5] instead of data[4]
             uint8_t state = rawEvent.data[6];     // Button state (0xC0=pressed, 0x40=released) - now at data[6] instead of data[5]
             
-            if (buttonId >= 0 && buttonId <= 24) {
-            // Apply the CORRECT COLUMN-MAJOR MAPPING that was working before
-            // Physical layout is 5x5 grid, but LED data is sent column-wise
-            uint8_t row = buttonId / 5;  // Row (0-4)
-            uint8_t col = buttonId % 5;  // Column (0-4)
-            uint8_t verticalIndex = col * 5 + row;  // LED index in column-major order
+            if (buttonId >= 0 && buttonId <= 23) {  // USB sends vertical indices 0-23 directly
+            // USB already sends vertical index (column-major order) - no conversion needed!
+            uint8_t verticalIndex = buttonId;
+            
+            // Convert vertical index to physical position for debugging
+            uint8_t col = verticalIndex / 5;  // Column (0-4)
+            uint8_t row = verticalIndex % 5;  // Row (0-4)
+            uint8_t physicalIndex = row * 5 + col;  // Physical index (0-23)
+            uint8_t physicalButton = physicalIndex + 1;  // Physical button label (1-24)
+            
+            // DEBUG: Show the actual mapping
+            Serial.printf("🔧 USB buttonId=%d is already verticalIndex, converts to physical button %d (index %d)\n",
+                         buttonId, physicalButton, physicalIndex);
             
             // DEBUG: Track problematic buttons that get stuck
             bool isProblematicButton = (buttonId == 23 || buttonId == 10 || buttonId == 14 || buttonId == 15 || buttonId == 20);

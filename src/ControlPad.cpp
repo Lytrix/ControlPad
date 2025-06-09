@@ -237,36 +237,39 @@ void ControlPad::setButtonColor(uint8_t buttonIndex, const ControlPadColor& colo
 void ControlPad::setAllButtonColors(const ControlPadColor* colors) {
     bool anyChanged = false;
     
-    Serial.println("🌈 setAllButtonColors() called - updating base colors:");
+    Serial.println("🌈 setAllButtonColors() called - using physical indexing:");
     
-    for (uint8_t i = 0; i < CONTROLPAD_NUM_BUTTONS; ++i) {
-        if (baseColors[i].r != colors[i].r || 
-            baseColors[i].g != colors[i].g || 
-            baseColors[i].b != colors[i].b) {
+    for (uint8_t physicalIndex = 0; physicalIndex < CONTROLPAD_NUM_BUTTONS; ++physicalIndex) {
+        if (baseColors[physicalIndex].r != colors[physicalIndex].r || 
+            baseColors[physicalIndex].g != colors[physicalIndex].g || 
+            baseColors[physicalIndex].b != colors[physicalIndex].b) {
             
-            // Direct assignment to base color
-            baseColors[i] = colors[i];
+            // Direct assignment to base color (physical indexing)
+            baseColors[physicalIndex] = colors[physicalIndex];
             
-            Serial.printf("  Button %d: RGB(%d,%d,%d)\n", i + 1, colors[i].r, colors[i].g, colors[i].b);
+            Serial.printf("  Physical %d: RGB(%d,%d,%d)\n", 
+                         physicalIndex, colors[physicalIndex].r, colors[physicalIndex].g, colors[physicalIndex].b);
             
             // Direct assignment to current color if not highlighted
-            if (!buttonHighlighted[i]) {
-                currentColors[i] = colors[i];
+            if (!buttonHighlighted[physicalIndex]) {
+                currentColors[physicalIndex] = colors[physicalIndex];
             }
             
             // Mark this specific LED as dirty
-            ledDirtyFlags[i] = true;
+            ledDirtyFlags[physicalIndex] = true;
             anyChanged = true;
         }
     }
     
     if (anyChanged) {
         ledsDirty = true;
-        Serial.printf("✅ Updated %d button base colors\n", 
+        Serial.printf("✅ Updated %d button colors (physical indexing)\n", 
                      (int)std::count(ledDirtyFlags, ledDirtyFlags + CONTROLPAD_NUM_BUTTONS, true));
         
-        // Auto-update if enabled - but defer to prevent USB conflicts during button events
-        // The update will happen during the next poll() cycle
+        // Send physical colors to hardware layer (hardware will reorganize for USB)
+        if (hw) {
+            hw->setAllLeds(colors, CONTROLPAD_NUM_BUTTONS);
+        }
     } else {
         Serial.println("⚠️ No base color changes detected");
     }
