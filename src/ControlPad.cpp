@@ -198,7 +198,6 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
     if (pressed) {
         // Direct white highlight assignment for immediate visual feedback
         currentColors[buttonIndex] = {255, 255, 255};
-        Serial.printf("🔥 Button %d PRESSED → WHITE highlighting\n", buttonIndex + 1);
     } else {
         // Direct base color restore assignment - ensure we have valid base colors
         if (baseColors[buttonIndex].r == 0 && baseColors[buttonIndex].g == 0 && baseColors[buttonIndex].b == 0) {
@@ -206,11 +205,6 @@ void ControlPad::setButtonHighlight(uint8_t buttonIndex, bool pressed) {
             baseColors[buttonIndex] = {64, 64, 64};
         }
         currentColors[buttonIndex] = baseColors[buttonIndex];
-        Serial.printf("⚡ Button %d RELEASED → Restored to RGB(%d,%d,%d)\n", 
-                     buttonIndex + 1, 
-                     currentColors[buttonIndex].r, 
-                     currentColors[buttonIndex].g, 
-                     currentColors[buttonIndex].b);
     }
     
     // ⚡ SIMPLE IMMEDIATE LED UPDATE - No interrupt protection
