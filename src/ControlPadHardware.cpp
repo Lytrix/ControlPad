@@ -662,9 +662,9 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count) {
     // Temporary: Disable polling control to test if that's causing black LEDs
     // pauseUSBPolling();
     result &= (InterruptMessage(ctrl_ep_out, 64, cmd1) == 0);
-    result &= (InterruptMessage(ctrl_ep_out, 64, cmd2) == 0);
-    result &= (InterruptMessage(ctrl_ep_out, 64, cmd3) == 0);
-    result &= (InterruptMessage(ctrl_ep_out, 64, cmd4) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 36, cmd2) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 2, cmd3) == 0);
+    result &= (InterruptMessage(ctrl_ep_out, 6, cmd4) == 0);
     // resumeUSBPolling();
     
     return result;
