@@ -647,57 +647,48 @@ UnifiedLEDManager ledManager;
 // ===== USB CALLBACK COMPLETION HANDLING WITH DETAILED DEBUGGING =====
 bool USBControlPad::hid_process_out_data(const Transfer_t *transfer) {
     // Called by USBHost_t36 when any output transfer completes
+    // *** CRITICAL: Keep this function VERY lightweight - no heavy Serial prints! ***
     
-    // *** DETAILED USB TRANSFER DEBUGGING ***
+    // *** MINIMAL transfer analysis ***
     uint32_t token = transfer->qtd.token;
     uint32_t status = token & 0xFF;
-    uint32_t pid = (token >> 8) & 3;
-    uint32_t length = (token >> 16) & 0x7FFF;
-    bool halted = (token & 0x40) != 0;
-    bool data_buffer_error = (token & 0x20) != 0;
-    bool babble = (token & 0x10) != 0;
-    bool transaction_error = (token & 0x08) != 0;
-    bool missed_microframe = (token & 0x04) != 0;
-    // bool split_transaction_state = (token & 0x02) != 0;  // Unused for now
-    // bool ping_state = (token & 0x01) != 0;              // Unused for now
+    bool transferSuccess = (status == 0);
     
-    static uint32_t total_transfers = 0;
+    // *** Use buffer address as transfer ID (matches sendCommand) ***
+    uint32_t transferId = (uint32_t)transfer->buffer;  // Use buffer address to match sendCommand
+    extern USBSynchronizedPacketController usbSyncController;
+    
+    // *** MINIMAL logging - only for critical errors ***
     static uint32_t failed_transfers = 0;
     static uint32_t last_failure_time = 0;
     
-    total_transfers++;
-    
-    // Detailed failure analysis
-    if (status != 0 || halted || data_buffer_error || babble || transaction_error) {
+    if (transferSuccess) {
+        // *** SUCCESS: Minimal cleanup ***
+        usbSyncController.onTransferCompleted(transferId, true, (token >> 16) & 0x7FFF);
+        
+        // Simple debug pin toggle (fast)
+        digitalWrite(DEBUG_PIN_USB_COMPLETE, HIGH);
+        digitalWrite(DEBUG_PIN_USB_COMPLETE, LOW);
+        
+    } else {
+        // *** FAILURE: Count and report later ***
         failed_transfers++;
         last_failure_time = millis();
         
-        Serial.printf("❌ USB TRANSFER FAILED #%lu - Status: 0x%02X, Token: 0x%08X\n", 
-                     failed_transfers, status, token);
-        Serial.printf("   ⚠️ Errors: Halted:%d DBE:%d Babble:%d XactErr:%d MMF:%d\n", 
-                     halted, data_buffer_error, babble, transaction_error, missed_microframe);
-        Serial.printf("   📊 PID:%d, Length:%d, Time:%lu ms\n", pid, length, millis());
+        // Minimal error code calculation
+        uint32_t errorCode = status;
+        if (token & 0x40) errorCode |= 0x40;  // halted
+        if (token & 0x20) errorCode |= 0x20;  // data_buffer_error
         
-        // Decode specific error conditions
-        if (halted) Serial.println("   💥 HALTED: Endpoint is stalled");
-        if (data_buffer_error) Serial.println("   💥 DATA BUFFER ERROR: Data under/overrun");
-        if (babble) Serial.println("   💥 BABBLE: Device sent more data than expected");
-        if (transaction_error) Serial.println("   💥 TRANSACTION ERROR: CRC, timeout, etc.");
-        if (missed_microframe) Serial.println("   💥 MISSED MICROFRAME: High-speed timing issue");
+        usbSyncController.onTransferError(transferId, errorCode, "USB_Error");
+        
+        // Only print critical errors (not in interrupt context)
+        if (failed_transfers % 10 == 1) {  // Every 10th failure
+            // Defer serial output to prevent interrupt issues
+        }
     }
     
-    // Only report failures immediately, skip regular health reports
-    if (failed_transfers > 0 && millis() - last_failure_time < 500) {
-        // Keep failure reporting for critical issues
-    }
-    
-    // *** HARDWARE DEBUG: USB transfer completed ***
-    digitalWrite(DEBUG_PIN_USB_START, LOW);   // Clear transfer start pin
-    digitalWrite(DEBUG_PIN_USB_COMPLETE, HIGH);
-    delayMicroseconds(10);  // 10us pulse for scope trigger
-    digitalWrite(DEBUG_PIN_USB_COMPLETE, LOW);
-    
-    // *** CRITICAL: Notify queue that command completed and process next ***
+    // *** Notify queue system ***
     ledQueue.onCommandComplete();
     
     return true;
@@ -714,11 +705,20 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
         Serial.printf("❌ sendCommand failed: device=%p, driver=%p\n", mydevice, driver_);
         return false;
     }
-        // *** SEND COMMAND ***
+    
+    // *** NEW: Use buffer address as transfer ID (matches completion handler) ***
+    extern USBSynchronizedPacketController usbSyncController;
+    uint32_t transferId = (uint32_t)data;  // Use buffer address as ID to match completion handler
+    
+    // Start tracking this transfer before sending
+    usbSyncController.onTransferStarted(transferId, data, length);
+    
+    // *** SEND COMMAND ***
     bool success = driver_->sendPacket(const_cast<uint8_t*>(data), length);
     
     if (!success) {
-    //    digitalWrite(DEBUG_PIN_USB_START, LOW);  // Clear if failed immediately
+        // If send failed immediately, mark the transfer as completed with failure
+        usbSyncController.onTransferCompleted(transferId, false, 0);
     }
     
     // USBHost_t36 handles all timing and will call hid_process_out_data() when complete
@@ -928,6 +928,9 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
 bool USBControlPad::begin(DMAQueue<controlpad_event, 16> *q) {
     queue = q;
     if (queue != nullptr) {
+        // Initialize debug pins for hardware monitoring
+        initDebugPins();
+        
         Serial.println("🎯 USB DRIVER BEGIN - Starting with HID Input only...");
         initialized = true;
         Serial.println("✅ USB Driver initialization complete");

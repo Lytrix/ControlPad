@@ -259,19 +259,20 @@ void sendLedPacketPhase() {
      // 100us delay
     // HACK: Send LED data packets back-to-back using direct USB to avoid queue delays
     Serial.println("⚡ Sending LED data packets back-to-back (direct USB)...");
-    bool result0 = globalControlPadDriver.sendDirectUSB(cmd, 64);    // Apply 1 - QUEUED
-    bool result1 = globalControlPadDriver.sendDirectUSB(package1, 64);  // Package 1 - DIRECT
-    bool result2 = globalControlPadDriver.sendDirectUSB(package2, 64);  // Package 2 - DIRECT
+    bool result0 = globalControlPadDriver.sendCommand(cmd, 64);    // Apply 1 - QUEUED
+    bool result1 = globalControlPadDriver.sendCommand(package1, 64);  // Package 1 - DIRECT
+    delayMicroseconds(2000);
+    bool result2 = globalControlPadDriver.sendCommand(package2, 64);  // Package 2 - DIRECT
     // Brief micro-delay to let LED data settle, then send Apply commands via queue
-    
+    delayMicroseconds(2000);
     // Critical: Apply commands through queue with retries
-    bool result3 = globalControlPadDriver.sendDirectUSB(apply1, 64);    // Apply 1 - QUEUED
+    bool result3 = globalControlPadDriver.sendCommand(apply1, 64);    // Apply 1 - QUEUED
     if (!result3) {
         Serial.println("⚠️ Apply1 failed, retrying...");
         delay(5);  // Brief delay
         result3 = globalControlPadDriver.sendCommand(apply1, 64);
     }
-    bool result4 = globalControlPadDriver.sendDirectUSB(apply2, 64);    // Apply 2 - QUEUED
+    bool result4 = globalControlPadDriver.sendCommand(apply2, 64);    // Apply 2 - QUEUED
     if (!result4) {
         Serial.println("⚠️ Apply2 failed, retrying...");
         delay(5);  // Brief delay
@@ -367,8 +368,9 @@ void loop() {
     loopCounter++;
     
     // *** CRITICAL: USB Host Task() - must be called frequently ***
-    globalUSBHost.Task();
-    
+    if (millis() % 5000 == 0) {
+        globalUSBHost.Task();
+    }
     // *** MIDI-TIMED LED PROCESSING ***
     if (tickFlag) {
         tickFlag = false;
@@ -385,20 +387,20 @@ void loop() {
     }
     
     // *** BUTTON EVENT PROCESSING ***
-    ControlPadEvent event;
-    while (controlPad.pollEvent(event)) {
-        if (event.type == ControlPadEventType::Button) {
-            // Update button highlighting immediately
-            controlPad.setButtonHighlight(event.button.button, event.button.pressed);
+    // ControlPadEvent event;
+    // while (controlPad.pollEvent(event)) {
+    //     if (event.type == ControlPadEventType::Button) {
+    //         // Update button highlighting immediately
+    //         controlPad.setButtonHighlight(event.button.button, event.button.pressed);
             
-            // Simple LED update for responsive feedback
-            sendLedUpdate();
+    //         // Simple LED update for responsive feedback
+    //         sendLedUpdate();
             
-            Serial.printf("🎮 Button %d %s\n", 
-                         event.button.button + 1,
-                         event.button.pressed ? "PRESSED" : "RELEASED");
-        }
-    }
+    //         Serial.printf("🎮 Button %d %s\n", 
+    //                      event.button.button + 1,
+    //                      event.button.pressed ? "PRESSED" : "RELEASED");
+    //     }
+    // }
     
     // Minimal status output every 10 seconds
     if (millis() - lastDebug >= 10000) {
