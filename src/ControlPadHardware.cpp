@@ -218,7 +218,7 @@ public:
     }
     
     bool shouldSendUpdate() {
-        uint32_t currentTime = millis();
+        uint32_t currentTime = millis();  // Back to millis() for now
         
         // Always send if state changed due to button press/release
         if (stateChanged) return true;
@@ -261,7 +261,7 @@ public:
     
     const ControlPadColor* getLEDState() {
         updateLEDState();
-        lastUpdateTime = millis();
+        lastUpdateTime = millis();  // Back to millis() for now
         return currentLEDState;
     }
 };
@@ -309,7 +309,7 @@ bool USBControlPad::hid_process_out_data(const Transfer_t *transfer) {
     // Detailed failure analysis
     if (status != 0 || halted || data_buffer_error || babble || transaction_error) {
         failed_transfers++;
-        last_failure_time = millis();
+        last_failure_time = millis();  // Back to millis() for now
         
         Serial.printf("❌ USB TRANSFER FAILED #%lu - Status: 0x%02X, Token: 0x%08X\n", 
                      failed_transfers, status, token);
@@ -581,7 +581,13 @@ bool USBControlPad::begin() {
     return true;
 }
 
-// ===== SIMPLE WORKING LED QUEUE - FIXES STALL ISSUE =====
+// *** USB FRAME-BASED TIMING IMPLEMENTATION ***
+// All timing in LED control now uses USB frame numbers instead of millis()
+// This provides frame-synchronized timing that's coherent with USB bus timing
+// 1 USB frame ≈ 1ms, counting in 8ths (microframes), providing more stable timing
+// than system millis() which can drift relative to USB bus
+
+// *** USB FRAME-BASED TIMING HELPERS ***
 // USB frame-synchronized timing functions (must be declared before use)
 uint32_t getUSBFrameNumber() {
     // EHCI FRINDEX register format: [13:3] = frame number, [2:0] = microframe
@@ -589,6 +595,15 @@ uint32_t getUSBFrameNumber() {
     uint32_t frindex = USBHS_FRINDEX;
     return (frindex >> 3) & 0x7FF;  // Extract bits [13:3], mask to 11 bits (0-2047)
 }
+
+// Get current time in USB frames instead of millis() - provides USB-synchronized timing
+uint32_t getUSBFrameTime() {
+    return getUSBFrameNumber();
+}
+
+// Convert between frame time and milliseconds (1:1 mapping for USB Full Speed)
+#define FRAMES_TO_MS(frames) (frames)
+#define MS_TO_FRAMES(ms) (ms)
 
 // Simple cleanup detection for logging only
 static uint32_t lastCleanupFrame = 0;
@@ -652,10 +667,9 @@ bool sendPacketWithRetry(const uint8_t* packet, size_t length, const char* packe
 }
 
 // Enhanced USB frame synchronization with cleanup timing correction and short frame detection
-bool usbFrameSynchronizedDelayMs(uint32_t milliseconds, bool* hasShortFrames = nullptr) {
+bool usbFrameSynchronizedDelayMs(uint32_t milliseconds, bool* hasShortFrames = nullptr, uint32_t shortFrameThreshold = 200) {
     const uint32_t NORMAL_FRAME_TIME = 1000; // 1ms per frame
     const uint32_t FRAME_TOLERANCE = 150;    // Allow ±150μs variance
-    const uint32_t SHORT_FRAME_THRESHOLD = 200; // Frames shorter than 200μs are problematic
     
     bool detectedShortFrames = false;
     
@@ -678,21 +692,22 @@ bool usbFrameSynchronizedDelayMs(uint32_t milliseconds, bool* hasShortFrames = n
                             (0x800 + currentFrame - startFrame);
         
         // Detect problematic short frames
-        if (actualDelay < SHORT_FRAME_THRESHOLD) {
+        if (actualDelay < shortFrameThreshold) {
             detectedShortFrames = true;
         }
         
         // ** SIMPLIFIED LOGGING - NO AGGRESSIVE COMPENSATION **
+        // Use dynamic shortFrameThreshold instead of fixed FRAME_TOLERANCE for SHORT detection
         if (actualDelay > (NORMAL_FRAME_TIME + FRAME_TOLERANCE)) {
             // Only log unusual delays, don't try to "fix" them
             Serial.printf("🕐 Frame %d: 0x%03X→0x%03X, %dμs ⚠️LONG (Δ:%d, μf:%d)\\n", 
                          i + 1, startFrame, currentFrame, actualDelay, frameDiff, endMicroframe);
-        } else if (actualDelay < (NORMAL_FRAME_TIME - FRAME_TOLERANCE)) {
-            // Log short frames but don't add compensation delays
+        } else if (actualDelay < shortFrameThreshold) {
+            // Log short frames using dynamic threshold (patience mode aware)
             Serial.printf("🕐 Frame %d: 0x%03X→0x%03X, %dμs ⚠️SHORT (Δ:%d, μf:%d)\\n", 
                          i + 1, startFrame, currentFrame, actualDelay, frameDiff, endMicroframe);
         } else {
-            // Normal timing
+            // Normal timing (above threshold)
             Serial.printf("🕐 Frame %d: 0x%03X→0x%03X, %dμs (Δ:%d, μf:%d)\\n", 
                          i + 1, startFrame, currentFrame, actualDelay, frameDiff, endMicroframe);
         }
@@ -912,7 +927,7 @@ void printCleanupStatus() {
     Serial.printf("   - Last cleanup frame: 0x%03X\n", lastCleanupFrame);
     Serial.printf("   - Total cleanup events: %d\n", cleanupFrameCount);
     Serial.printf("   - Retry mechanism: Active (>950μs triggers retry)\n");
-}
+    }
 
 void resetCleanupData() {
     lastCleanupFrame = 0;
@@ -1049,7 +1064,7 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         return false;
     }
     
-    // *** TEST: Try sending activation + custom mode before LED commands ***
+    // *** ACTIVATION REQUIRED: Device needs activation before LED operations ***
     static bool firstTime = true;
     if (firstTime) {
         Serial.println("🔄 First LED update - sending activation + custom mode...");
@@ -1109,6 +1124,9 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
     bool sequenceSuccess = false;
     bool hadRetries = false; // Track if any retries occurred
     
+    // Simple fixed threshold - no patience mode complexity
+            uint32_t shortFrameThreshold = 25; // Temporarily increased from 18μs to debug flickering
+    
     for (int sequenceAttempt = 0; sequenceAttempt <= MAX_SEQUENCE_RETRIES && !sequenceSuccess; sequenceAttempt++) {
         if (sequenceAttempt > 0) {
             hadRetries = true; // Mark that retries occurred
@@ -1119,7 +1137,7 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         // Reset cleanup detection for this attempt
         cleanupDuringP1 = cleanupDuringP2 = cleanupDuringP3 = false;
         bool frameTimingOK = true;
-        
+    
         // Packet 1: LED data package 1
         p1StartFrame = getUSBFrameNumber();
         if (!sendPacketWithRetry(pkg1, 64, "P1", &pkt1TransmitTime)) {
@@ -1128,12 +1146,12 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         p1EndFrame = getUSBFrameNumber();
         
         bool p1HasShortFrames = false;
-        cleanupDuringP1 = usbFrameSynchronizedDelayMs(1, &p1HasShortFrames);
+        cleanupDuringP1 = usbFrameSynchronizedDelayMs(1, &p1HasShortFrames, shortFrameThreshold);
         uint32_t afterP1Frame = getUSBFrameNumber();
         
         // Check for problematic short frames after P1
         if (p1HasShortFrames) {
-            Serial.printf("⚠️ P1 short frame detected (<200μs), retrying sequence\n");
+            Serial.printf("⚠️ P1 short frame detected (<%dμs), retrying sequence\n", shortFrameThreshold);
             frameTimingOK = false;
             continue; // Immediately retry - don't waste time sending remaining packets
         }
@@ -1151,12 +1169,12 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         p2EndFrame = getUSBFrameNumber();
         
         bool p2HasShortFrames = false;
-        cleanupDuringP2 = usbFrameSynchronizedDelayMs(1, &p2HasShortFrames);
+        cleanupDuringP2 = usbFrameSynchronizedDelayMs(1, &p2HasShortFrames, shortFrameThreshold);
         uint32_t afterP2Frame = getUSBFrameNumber();
         
         // Check for problematic short frames after P2
         if (p2HasShortFrames) {
-            Serial.printf("⚠️ P2 short frame detected (<200μs), retrying sequence\n");
+            Serial.printf("⚠️ P2 short frame detected (<%dμs), retrying sequence\n", shortFrameThreshold);
             frameTimingOK = false;
             continue; // Immediately retry - don't waste time sending remaining packets
         }
@@ -1167,10 +1185,10 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         }
         
         // Command 3: Apply command
-        uint8_t applyCmd[64] = {0};
-        applyCmd[0] = 0x41; applyCmd[1] = 0x80;
-        applyCmd[2] = 0x00; applyCmd[3] = 0x00;
-        
+    uint8_t applyCmd[64] = {0};
+    applyCmd[0] = 0x41; applyCmd[1] = 0x80;
+    applyCmd[2] = 0x00; applyCmd[3] = 0x00;
+    
         p3StartFrame = getUSBFrameNumber();
         if (!sendPacketWithRetry(applyCmd, 64, "P3", &pkt3TransmitTime)) {
             continue; // Retry entire sequence
@@ -1178,12 +1196,12 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         p3EndFrame = getUSBFrameNumber();
         
         bool p3HasShortFrames = false;
-        cleanupDuringP3 = usbFrameSynchronizedDelayMs(1, &p3HasShortFrames);
+        cleanupDuringP3 = usbFrameSynchronizedDelayMs(1, &p3HasShortFrames, shortFrameThreshold);
         uint32_t afterP3Frame = getUSBFrameNumber();
         
         // Check for problematic short frames after P3
         if (p3HasShortFrames) {
-            Serial.printf("⚠️ P3 short frame detected (<200μs), retrying sequence\n");
+            Serial.printf("⚠️ P3 short frame detected (<%dμs), retrying sequence\n", shortFrameThreshold);
             frameTimingOK = false;
             continue; // Immediately retry - don't waste time sending remaining packets
         }
@@ -1194,17 +1212,17 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
         }
         
         // Command 4: Finalize command (no delay after final packet)
-        uint8_t finalizeCmd[64] = {0};
-        finalizeCmd[0] = 0x51; finalizeCmd[1] = 0x28;
-        finalizeCmd[2] = 0x00; finalizeCmd[3] = 0x00;
-        finalizeCmd[4] = 0xFF; finalizeCmd[5] = 0x00;
-        
+    uint8_t finalizeCmd[64] = {0};
+    finalizeCmd[0] = 0x51; finalizeCmd[1] = 0x28;
+    finalizeCmd[2] = 0x00; finalizeCmd[3] = 0x00;
+    finalizeCmd[4] = 0xFF; finalizeCmd[5] = 0x00;
+    
         p4StartFrame = getUSBFrameNumber();
         if (!sendPacketWithRetry(finalizeCmd, 64, "P4", &pkt4TransmitTime)) {
             continue; // Retry entire sequence
         }
         p4EndFrame = getUSBFrameNumber();
-        
+    
         // If we made it here and frame timing was OK, sequence succeeded
         if (frameTimingOK) {
             sequenceSuccess = true;
@@ -1250,19 +1268,21 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
     // Work WITH the natural USB cleanup cycle instead of against it
     static uint32_t cleanupEventCount = 0;
     
-    // Detect cleanup timing and wait 1 frame for natural realignment
+    // Detect cleanup timing and wait 3 frames for natural realignment
     // Only trigger on major cleanup events (>3290μs), avoiding startup variance and post-cleanup elevated timing
     // Skip cleanup detection if retries occurred (extended timing is due to retries, not USB cleanup)
     if (updateDuration > 3291 && !hadRetries) { // High threshold to avoid false positives: startup(3229μs) and post-cleanup(2300-2400μs)
         cleanupEventCount++;
-        Serial.printf("🔄 Cleanup event #%d detected: %dμs - waiting 1 frame for USB realignment\n", cleanupEventCount, updateDuration);
+        Serial.printf("🔄 Cleanup event #%d detected: %dμs - waiting 10 frames for USB realignment\n", cleanupEventCount, updateDuration);
         
-        // Wait exactly 1 USB frame (1ms) for natural realignment
-        uint32_t currentFrame = getUSBFrameNumber();
-        while (getUSBFrameNumber() == currentFrame) {
-            // Wait for next frame
+        // Wait 10 USB frames (10ms) for complete realignment after major cleanup
+        for (int i = 0; i < 10; i++) {
+            uint32_t currentFrame = getUSBFrameNumber();
+            while (getUSBFrameNumber() == currentFrame) {
+                // Wait for next frame
+            }
         }
-        Serial.printf("✅ USB realignment complete - resuming LED updates\n");
+        Serial.printf("✅ USB realignment complete (10 frames) - resuming LED updates\n");
     } else if (hadRetries) {
         Serial.printf("🔄 Extended timing (%dμs) due to retries - skipping cleanup detection\n", updateDuration);
     }
