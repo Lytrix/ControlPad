@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "ARMTimer.h"
 
 #define CONTROLPAD_NUM_BUTTONS 24
 
@@ -105,9 +106,9 @@ private:
     bool ledDirtyFlags[CONTROLPAD_NUM_BUTTONS];           // Per-LED dirty tracking
     bool smartUpdatesEnabled;                              // Enable automatic smart updates
     bool ledUpdateInProgress;                              // Prevent concurrent updates
-    unsigned long lastUpdateTime;                          // Last LED update timestamp
-    unsigned long lastButtonTime[CONTROLPAD_NUM_BUTTONS]; // Debounce timing per button
-    unsigned long updateInterval;                          // Minimum time between updates
+    uint32_t lastButtonTime[CONTROLPAD_NUM_BUTTONS];      // Debounce timing per button (ARM cycles)
+    uint32_t updateIntervalMicros;                         // Minimum time between updates (microseconds)
+    ARMIntervalTimer ledUpdateTimer;                       // ARM timer for LED updates
     
     // Internal smart LED methods
     void updateSmartLeds();
