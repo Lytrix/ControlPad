@@ -1,4 +1,5 @@
 #include "ControlPadHardware.h"
+#include "ARMTimer.h"
 #include <USBHost_t36.h>  // For testing with standard drivers
 
 // Global hardware instance for access from USB callbacks
@@ -68,203 +69,32 @@ static void initDebugPins() {
 }
 
 // ===== LED COMMAND QUEUE SYSTEM =====
-// Using USBHost_t36 proper queuing pattern to avoid USB contention
-struct QueuedLEDCommand {
-    uint8_t data[64];
-    size_t length;
-    uint8_t commandType; // 1=Package1, 2=Package2, 3=Apply1, 4=Apply2
-    bool priority;       // High priority for button events
-};
+// Now using EventResponder-based queue from header file
 
-class LEDCommandQueue {
-private:
-    static const size_t MAX_QUEUED = 64;  // Double the buffer for faster updates
-    QueuedLEDCommand commands[MAX_QUEUED];
-    volatile size_t head = 0;
-    volatile size_t tail = 0;
-    volatile size_t count = 0;
-    volatile bool processing = false;
-    
+// ===== NEW SIMPLIFIED QUEUE SYSTEM =====
+static LEDPacketQueue ledQueue;  // Simple packet queue
+static LEDTimingController ledTimingController(ledQueue);  // 1ms timing controller
+
+// *** TEMPORARY: Test with slower timing to debug queue issues ***
+class TimingControllerSetup {
 public:
-    // *** ATOMIC 2-PACKET LED DATA ENQUEUING - REDUCED BANDWIDTH ***
-    bool enqueueLEDData(const uint8_t* pkg1, const uint8_t* pkg2, bool priority = false) {
-        // Check if we have space for 2 LED data packets atomically
-        if (count > (MAX_QUEUED - 2)) {
-            Serial.printf("⚠️ LED queue full - need 2 slots, have %zu available\n", MAX_QUEUED - count);
-            digitalWrite(DEBUG_PIN_QUEUE_FULL, HIGH);
-            delayMicroseconds(50);
-            digitalWrite(DEBUG_PIN_QUEUE_FULL, LOW);
-            return false;
-        }
+    TimingControllerSetup() {
+        Serial.println("🚀 TimingControllerSetup constructor starting...");
         
-        __disable_irq();
+        // Set 1ms interval for optimal performance
+        ledTimingController.setIntervalMicros(1000);  // 1ms precise timing
+        Serial.println("⚡ TIMING: Set interval to 1ms for optimal LED performance");
         
-        if (priority) {
-            // *** HIGH PRIORITY: Insert LED data packets at front ***
-            tail = (tail - 2 + MAX_QUEUED) % MAX_QUEUED;
-            size_t pos = tail;
-            
-            // Package1
-            memcpy(commands[pos].data, pkg1, 64);
-            commands[pos].length = 64;
-            commands[pos].commandType = 1;
-            commands[pos].priority = priority;
-            pos = (pos + 1) % MAX_QUEUED;
-            
-            // Package2
-            memcpy(commands[pos].data, pkg2, 64);
-            commands[pos].length = 64;
-            commands[pos].commandType = 2;
-            commands[pos].priority = priority;
-            
-        } else {
-            // *** NORMAL PRIORITY: Insert at head (back of queue) ***
-            size_t pos = head;
-            
-            // Package1
-            memcpy(commands[pos].data, pkg1, 64);
-            commands[pos].length = 64;
-            commands[pos].commandType = 1;
-            commands[pos].priority = priority;
-            pos = (pos + 1) % MAX_QUEUED;
-            
-            // Package2
-            memcpy(commands[pos].data, pkg2, 64);
-            commands[pos].length = 64;
-            commands[pos].commandType = 2;
-            commands[pos].priority = priority;
-            
-            head = (head + 2) % MAX_QUEUED;
-        }
+        // Show initial controller state
+        Serial.printf("🔧 Timing controller: enabled=%s, queueSize=%d, interval=%dus\n", 
+                     ledTimingController.isEnabled() ? "YES" : "NO",
+                     ledTimingController.getQueueSize(),
+                     5000);
         
-        count += 2;
-        
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
-        
-        if (!processing) {
-            processNext();
-        }
-        
-        return true;
+        Serial.println("✅ TimingControllerSetup constructor complete");
     }
-    
-    // *** SINGLE PACKET ENQUEUING for Apply commands ***
-    bool enqueueSingle(const uint8_t* data, uint8_t type, bool priority = false) {
-        if (count >= MAX_QUEUED) {
-            return false;
-        }
-        
-        __disable_irq();
-        
-        if (priority) {
-            tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
-            memcpy(commands[tail].data, data, 64);
-            commands[tail].length = 64;
-            commands[tail].commandType = type;
-            commands[tail].priority = priority;
-        } else {
-            memcpy(commands[head].data, data, 64);
-            commands[head].length = 64;
-            commands[head].commandType = type;
-            commands[head].priority = priority;
-            head = (head + 1) % MAX_QUEUED;
-        }
-        
-        count++;
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
-        
-        if (!processing) {
-            processNext();
-        }
-        return true;
-    }
-    
-    // *** DEPRECATED - Use enqueueSequence instead ***
-    bool enqueue(const uint8_t* data, size_t length, uint8_t type, bool priority = false) {
-        Serial.println("⚠️ WARNING: Using deprecated single enqueue() - use enqueueSequence() for atomic operations");
-        
-        if (count >= MAX_QUEUED) {
-            Serial.println("⚠️ LED command queue full!");
-            return false;
-        }
-        
-        __disable_irq();
-        
-        if (priority) {
-            tail = (tail - 1 + MAX_QUEUED) % MAX_QUEUED;
-            memcpy(commands[tail].data, data, length);
-            commands[tail].length = length;
-            commands[tail].commandType = type;
-            commands[tail].priority = priority;
-        } else {
-            memcpy(commands[head].data, data, length);
-            commands[head].length = length;
-            commands[head].commandType = type;
-            commands[head].priority = priority;
-            head = (head + 1) % MAX_QUEUED;
-        }
-        
-        count++;
-        asm volatile("dmb" ::: "memory");
-        __enable_irq();
-        
-        if (!processing) {
-            processNext();
-        }
-        return true;
-    }
-    
-    bool dequeue(QueuedLEDCommand& cmd) {
-        if (count == 0) return false;
-        
-        __disable_irq();
-        cmd = commands[tail];
-        tail = (tail + 1) % MAX_QUEUED;
-        count--;
-        __enable_irq();
-        
-        return true;
-    }
-    
-    void processNext() {
-        // *** CRITICAL: Only process if not already processing and queue has items ***
-        if (processing || count == 0) return;
-        
-        processing = true;
-        QueuedLEDCommand cmd;
-        if (dequeue(cmd)) {
-            // *** ACTUALLY SEND THE COMMAND via USBHost_t36 ***
-            
-            bool success = globalControlPadDriver.sendCommand(cmd.data, cmd.length);
-            if (!success) {
-                // If send failed, allow processing to continue immediately
-                processing = false;
-                Serial.printf("❌ LED command type %d FAILED - retrying next in queue\n", cmd.commandType);
-                processNext(); // Try next command immediately
-            }
-            // If success, processing flag stays true until USB callback clears it
-        } else {
-            processing = false;
-        }
-    }
-    
-    void onCommandComplete() {
-        // *** Called from USB callback when command completes ***
-        processing = false;
-        processNext(); // Process next command in queue
-    }
-    
-    size_t size() const { return count; }
-    bool empty() const { return count == 0; }
-    bool isProcessing() const { return processing; }
-    size_t getHead() const { return head; }
-    size_t getTail() const { return tail; }
-
 };
-
-static LEDCommandQueue ledQueue;
+static TimingControllerSetup setupTiming;  // This runs at startup
 
 // ===== USB BANDWIDTH MONITORING WITH QUEUE TRACKING =====
 struct USBBandwidthMonitor {
@@ -281,13 +111,9 @@ struct USBBandwidthMonitor {
         
         // *** ENHANCED QUEUE MONITORING WITH ANOMALY DETECTION ***
         size_t current_queue_size = ledQueue.size();
-        size_t current_queue_pos = (ledQueue.getHead() + current_queue_size - 1) % 64;
+        // Queue position tracking simplified for EventResponder
         
-        // Detect significant wraparounds only (reduced logging) 
-        if (last_queue_position > current_queue_pos && last_queue_position > 56) {
-            Serial.printf("🔄 MAJOR WRAPAROUND: %lu → %lu (size=%zu)\n", 
-                         last_queue_position, current_queue_pos, current_queue_size);
-        }
+        // Simplified queue monitoring for atomic queue
         
         // *** LED DATA PAIR TRACKING ***
         // With new split approach: LED data comes in pairs (2), Apply commands are singles
@@ -296,22 +122,36 @@ struct USBBandwidthMonitor {
         static size_t last_check_size = 0;
         
         // Only check for stuck queues every few seconds to reduce noise
-        if (millis() - last_check_time > 3000) {
-            if (current_queue_size > 0 && last_check_size == current_queue_size) {
-                Serial.printf("⚠️ Queue unchanged at size %zu for >3sec\n", current_queue_size);
-            }
-            last_check_size = current_queue_size;
-            last_check_time = millis();
+        static ARMIntervalTimer queueCheckTimer;
+        static bool queueTimerInit = false;
+        if (!queueTimerInit) {
+            queueCheckTimer.setIntervalMillis(3000);
+            queueCheckTimer.start();
+            queueTimerInit = true;
         }
         
-        last_queue_position = current_queue_pos;
+        if (queueCheckTimer.hasElapsed()) {
+            if (current_queue_size > 0 && last_check_size == current_queue_size) {
+                // Debug removed to prevent timing issues
+            }
+            last_check_size = current_queue_size;
+        }
+        
+        // Queue position tracking removed for simplified queue
         
         // Report bandwidth every 10 seconds (reduced frequency)
-        if (millis() - last_report_time > 10000) {
+        static ARMIntervalTimer reportTimer;
+        static bool reportTimerInit = false;
+        if (!reportTimerInit) {
+            reportTimer.setIntervalMillis(10000);
+            reportTimer.start();
+            reportTimerInit = true;
+        }
+        
+        if (reportTimer.hasElapsed()) {
             // Reset counters quietly
             transfer_count = 0;
             byte_count = 0;
-            last_report_time = millis();
         }
     }
 };
@@ -347,6 +187,8 @@ public:
     }
     
     void updateLEDState() {
+        // Animation timing is now handled in shouldSendUpdate()
+        // Only rebuild LED state if something changed
         if (!stateChanged) return;
         
         // Start with base colors
@@ -354,16 +196,10 @@ public:
             currentLEDState[i] = BASE_COLORS[i];
         }
         
-        // Apply animation if enabled
-        if (animationEnabled) {
-            // Cycle through buttons with white highlight every 100ms (smooth visual movement)
-            uint32_t currentTime = millis();
-            if (currentTime - animationTime >= 100) {
-                animationStep = (animationStep + 1) % 24;
-                animationTime = currentTime;
-            }
-            currentLEDState[animationStep] = {255, 255, 255}; // White animation highlight
-        }
+        // TEST: Disable animation highlight to test if static rainbow is stable
+        // if (animationEnabled) {
+        //     currentLEDState[animationStep] = {255, 255, 255}; // White animation highlight
+        // }
         
         // Apply button highlights (override animation on pressed buttons)
         for (int i = 0; i < 24; i++) {
@@ -382,16 +218,37 @@ public:
         // Always send if state changed due to button press/release
         if (stateChanged) return true;
         
-        // For animation: only send update when animation step actually changes
+        // Send initial update if this is the first time (lastSentAnimationStep == 255)
+        if (lastSentAnimationStep == 255) {
+            stateChanged = true;
+            return true;
+        }
+        
+        // *** ANIMATION TIMING CHECK MOVED HERE FROM updateLEDState() ***
+        // Check if animation step should advance (every 100ms - back to moderate speed)
         if (animationEnabled) {
-            // Update animation step if enough time has passed
             if (currentTime - animationTime >= 100) {
-                uint8_t nextStep = (animationStep + 1) % 24;
-                if (nextStep != lastSentAnimationStep) {
-                    stateChanged = true; // Animation step changed, need to send update
+                uint8_t newAnimationStep = (animationStep + 1) % 24;
+                if (newAnimationStep != animationStep) {
+                    animationStep = newAnimationStep;
+                    animationTime = currentTime;
+                    stateChanged = true; // Animation step changed, need update
+                    // Animation step logging removed to prevent timing issues
                     return true;
                 }
             }
+            
+            // Also check if we missed sending a previous animation step
+            if (animationStep != lastSentAnimationStep) {
+                stateChanged = true; // Animation step changed, need to send update
+                return true;
+            }
+        }
+        
+        // Periodic update even when animation is disabled (every 5 seconds for base colors)
+        if (!animationEnabled && (currentTime - lastUpdateTime) > 5000) {
+            stateChanged = true;
+            return true;
         }
         
         return false;
@@ -463,19 +320,16 @@ bool USBControlPad::hid_process_out_data(const Transfer_t *transfer) {
         if (missed_microframe) Serial.println("   💥 MISSED MICROFRAME: High-speed timing issue");
     }
     
-    // Only report failures immediately, skip regular health reports
-    if (failed_transfers > 0 && millis() - last_failure_time < 500) {
-        // Keep failure reporting for critical issues
-    }
+    // All health reporting disabled for clean testing
     
     // *** HARDWARE DEBUG: USB transfer completed ***
     digitalWrite(DEBUG_PIN_USB_START, LOW);   // Clear transfer start pin
     digitalWrite(DEBUG_PIN_USB_COMPLETE, HIGH);
-    delayMicroseconds(10);  // 10us pulse for scope trigger
+            ARMTimer::blockingDelayMicros(10);  // 10us pulse for scope trigger
     digitalWrite(DEBUG_PIN_USB_COMPLETE, LOW);
     
     // *** CRITICAL: Notify queue that command completed and process next ***
-    ledQueue.onCommandComplete();
+    // EventResponder handles completion automatically
     
     return true;
 }
@@ -496,12 +350,26 @@ bool USBControlPad::sendCommand(const uint8_t* data, size_t length) {
     initDebugPins();
     digitalWrite(DEBUG_PIN_USB_START, HIGH);
     
-    // *** SEND COMMAND ***
+    // *** SEND COMMAND WITH TIMEOUT MONITORING ***
+    uint32_t commandStart = ARMTimer::getMicros();
     
     // Record bandwidth usage
     bandwidthMonitor.recordTransfer(length);
     
     bool success = driver_->sendPacket(const_cast<uint8_t*>(data), length);
+    
+    uint32_t commandEnd = ARMTimer::getMicros();
+    uint32_t commandDuration = commandEnd - commandStart;
+    
+    // Log USB commands that take too long (over 10ms indicates timeout issues)
+    if (commandDuration > 10000) {
+        Serial.printf("🐌 USB sendPacket took %dms\n", commandDuration / 1000);
+    }
+    
+    // Critical timeout detection (over 1 second = major problem) 
+    if (commandDuration > 1000000) {
+        Serial.printf("🚨 CRITICAL USB TIMEOUT: %dms! Device may be unresponsive.\n", commandDuration / 1000);
+    }
     
     if (!success) {
         digitalWrite(DEBUG_PIN_USB_START, LOW);  // Clear if failed immediately
@@ -694,9 +562,9 @@ bool USBControlPad::hid_process_in_data(const Transfer_t *transfer) {
     return true; // Return true if we processed the data
 }
 
-bool USBControlPad::begin(DMAQueue<controlpad_event, 16> *q) {
-    queue = q;
-    if (queue != nullptr) {
+bool USBControlPad::begin() {
+    // Simplified initialization - no queue parameter needed
+    if (true) {
         Serial.println("🎯 USB DRIVER BEGIN - Starting with HID Input only...");
         initialized = true;
         Serial.println("✅ USB Driver initialization complete");
@@ -708,136 +576,424 @@ bool USBControlPad::begin(DMAQueue<controlpad_event, 16> *q) {
     return true;
 }
 
-bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority) {
-    if (!initialized || count > 24) {
-        Serial.printf("❌ updateAllLEDs failed: initialized=%d, count=%zu\n", initialized, count);
+// ===== SIMPLE WORKING LED QUEUE - FIXES STALL ISSUE =====
+// Just send LED data directly with minimal queueing
+bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority, uint32_t retryStartTime = 0) {
+    if (!colors || count == 0) {
+        Serial.println("❌ updateAllLEDs: Invalid parameters");
+        return false;
+    }
+
+    // Count constraints enforcement
+    if (count > CONTROLPAD_NUM_BUTTONS) {
+        Serial.printf("⚠️ updateAllLEDs: count %zu exceeds max %d, limiting\n", count, CONTROLPAD_NUM_BUTTONS);
+        count = CONTROLPAD_NUM_BUTTONS;
+    }
+
+    // *** DISABLED: SET CUSTOM MODE APPROACH ***
+    // Temporarily disabling setCustomMode() to test if constant mode switching causes flickering
+    // Device should stay in custom mode once initially set during activation
+    /*
+    uint32_t customModeStart = ARMTimer::getMicros();
+    if (!setCustomMode()) {
+        Serial.println("❌ Failed to set custom mode before LED update");
+        return false;
+    }
+    uint32_t customModeEnd = ARMTimer::getMicros();
+    
+    // Give device time to process custom mode command using ARM timer
+    uint32_t customModeTime = ARMTimer::getMicros();
+    while ((ARMTimer::getMicros() - customModeTime) < 999) {
+        // 999μs precise ARM timer delay
+    }
+    uint32_t delayEnd = ARMTimer::getMicros();
+    
+    Serial.printf("🎨 CustomMode: %dμs, Delay: %dμs, Total: %dμs\n", 
+                 customModeEnd - customModeStart, 
+                 delayEnd - customModeTime, 
+                 delayEnd - customModeStart);
+    */
+
+    // Prepare packages with CORRECT format from working implementation
+    uint8_t pkg1[64] = {0};
+    uint8_t pkg2[64] = {0};
+    
+    // *** CORRECT PACKAGE 1 HEADER ***
+    pkg1[0] = 0x56; pkg1[1] = 0x83; 
+    pkg1[2] = 0x00; pkg1[3] = 0x00;  // 0000
+    pkg1[4] = 0x01; pkg1[5] = 0x00; pkg1[6] = 0x00; pkg1[7] = 0x00;  // 01000000
+    pkg1[8] = 0x80; pkg1[9] = 0x01; pkg1[10] = 0x00; pkg1[11] = 0x00; // 80010000
+    pkg1[12] = 0xFF; pkg1[13] = 0x00; pkg1[14] = 0x00; pkg1[15] = 0x00; // ff000000
+    pkg1[16] = 0x00; pkg1[17] = 0x00; // 0000
+    pkg1[18] = 0xFF; // brightness
+    pkg1[19] = 0xFF; // brightness for all leds
+    pkg1[20] = 0x00; pkg1[21] = 0x00; pkg1[22] = 0x00; pkg1[23] = 0x00; // 00000000
+    
+    // *** CORRECT PACKAGE 2 HEADER ***
+    pkg2[0] = 0x56; pkg2[1] = 0x83; pkg2[2] = 0x01; // 568301
+    
+    // *** CORRECT LED ADDRESSING PATTERN ***
+    // Package 1: LEDs in groups of 5 by columns
+    // Group 1: LEDs 1,6,11,16,21 (using 0-based indexing: 0,5,10,15,20)
+    // Group 2: LEDs 2,7,12,17,22 (using 0-based indexing: 1,6,11,16,21)  
+    // Group 3: LEDs 3,8,13,18 (using 0-based indexing: 2,7,12,17) - partial
+    
+    int pkg1_pos = 24;  // Start after header
+    
+    // Group 1: LEDs 0,5,10,15,20
+    for (int i = 0; i < 5; i++) {
+        int led_idx = i * 5;  // 0, 5, 10, 15, 20
+        if (led_idx < count) {
+            pkg1[pkg1_pos++] = colors[led_idx].r;
+            pkg1[pkg1_pos++] = colors[led_idx].g; 
+            pkg1[pkg1_pos++] = colors[led_idx].b;
+        } else {
+            pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0;
+        }
+    }
+    
+    // Group 2: LEDs 1,6,11,16,21
+    for (int i = 0; i < 5; i++) {
+        int led_idx = 1 + i * 5;  // 1, 6, 11, 16, 21
+        if (led_idx < count) {
+            pkg1[pkg1_pos++] = colors[led_idx].r;
+            pkg1[pkg1_pos++] = colors[led_idx].g;
+            pkg1[pkg1_pos++] = colors[led_idx].b;
+        } else {
+            pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0;
+        }
+    }
+    
+    // Group 3: LEDs 2,7,12,17 (partial, LED 17 continues in pkg2)
+    for (int i = 0; i < 3; i++) {
+        int led_idx = 2 + i * 5;  // 2, 7, 12
+        if (led_idx < count) {
+            pkg1[pkg1_pos++] = colors[led_idx].r;
+            pkg1[pkg1_pos++] = colors[led_idx].g;
+            pkg1[pkg1_pos++] = colors[led_idx].b;
+        } else {
+            pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0; pkg1[pkg1_pos++] = 0;
+        }
+    }
+    
+    // LED 17 - only red byte in pkg1
+    if (17 < count) {
+        pkg1[pkg1_pos++] = colors[17].r;
+    } else {
+        pkg1[pkg1_pos++] = 0;
+    }
+    
+    // *** PACKAGE 2 CONTINUES LED 17 ***
+    int pkg2_pos = 3;  // Start after short header
+    
+    // Masked byte before LED 17's green/blue
+    pkg2[pkg2_pos++] = 0x00;
+    
+    // LED 17 - green and blue bytes
+    if (17 < count) {
+        pkg2[pkg2_pos++] = colors[17].g;
+        pkg2[pkg2_pos++] = colors[17].b;
+    } else {
+        pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0;
+    }
+    
+    // LED 22
+    if (22 < count) {
+        pkg2[pkg2_pos++] = colors[22].r;
+        pkg2[pkg2_pos++] = colors[22].g;
+        pkg2[pkg2_pos++] = colors[22].b;
+    } else {
+        pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0;
+    }
+    
+    // Group 4: LEDs 3,8,13,18,23
+    for (int i = 0; i < 5; i++) {
+        int led_idx = 3 + i * 5;  // 3, 8, 13, 18, 23
+        if (led_idx < count) {
+            pkg2[pkg2_pos++] = colors[led_idx].r;
+            pkg2[pkg2_pos++] = colors[led_idx].g;
+            pkg2[pkg2_pos++] = colors[led_idx].b;
+        } else {
+            pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0;
+        }
+    }
+    
+    // Group 5: LEDs 4,9,14,19
+    for (int i = 0; i < 4; i++) {
+        int led_idx = 4 + i * 5;  // 4, 9, 14, 19  
+        if (led_idx < count) {
+            pkg2[pkg2_pos++] = colors[led_idx].r;
+            pkg2[pkg2_pos++] = colors[led_idx].g;
+            pkg2[pkg2_pos++] = colors[led_idx].b;
+        } else {
+            pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0; pkg2[pkg2_pos++] = 0;
+        }
+    }
+    
+    bool hasColors = true;  // Always assume we have colors with correct format
+    
+    // Debug: Check if we have any actual color data
+    if (!hasColors) {
+        // Debug removed to prevent timing issues
+        // Add some test colors to verify the system works
+        if (count > 0) {
+            pkg1[3] = 255; pkg1[4] = 0; pkg1[5] = 0;    // Button 0: Red
+            pkg1[6] = 0; pkg1[7] = 255; pkg1[8] = 0;    // Button 1: Green  
+            pkg1[9] = 0; pkg1[10] = 0; pkg1[11] = 255;  // Button 2: Blue
+            Serial.println("🎨 Added test colors: Red, Green, Blue for buttons 0,1,2");
+        }
+    } else {
+        // Debug removed to prevent timing issues
+    }
+
+    // *** HARDWARE-TIMED QUEUE: No blocking delays! ***
+    
+    if (!isDeviceConnected()) {
+        Serial.println("❌ Device not connected");
         return false;
     }
     
-    const char* priorityStr = priority ? "HIGH PRIORITY" : "normal";
-    
-    // *** ALL 4 PACKETS REQUIRED: Both apply commands are essential for LEDs to work ***
-    
-    // *** CORRECT LED COMMAND SEQUENCE FROM USER DOCUMENTATION ***
-    
-    // COMMAND 2: Package 1 of 2 (0x56 0x83)
-    uint8_t package1[64] = {0};
-    package1[0] = 0x56;  // Vendor ID
-    package1[1] = 0x83;  // LED package command
-    package1[2] = 0x00;  // Package 1 indicator
-    package1[3] = 0x00;
-    package1[4] = 0x01;  // Unknown field
-    package1[5] = 0x00;
-    package1[6] = 0x00;
-    package1[7] = 0x00;
-    package1[8] = 0x80;  // Unknown field
-    package1[9] = 0x01;
-    package1[10] = 0x00;
-    package1[11] = 0x00;
-    package1[12] = 0xFF; // Brightness
-    package1[13] = 0x00;
-    package1[14] = 0x00;
-    package1[15] = 0x00;
-    package1[16] = 0x00;
-    package1[17] = 0x00;
-    package1[18] = 0xFF; // Global brightness
-    package1[19] = 0xFF; // Global brightness
-    package1[20] = 0x00;
-    package1[21] = 0x00;
-    package1[22] = 0x00;
-    package1[23] = 0x00;
-    
-    // LED data starts at byte 24 - Direct assignments for performance (no loops)
-    // Column-major layout: Column 1, Column 2, Column 3 (partial), etc.
-    
-    // *** PACKAGE 1: DIRECT ASSIGNMENTS FOR MAXIMUM PERFORMANCE ***
-    // Column 1: LED indices 0, 5, 10, 15, 20
-    package1[24] = colors[0].r;  package1[25] = colors[0].g;  package1[26] = colors[0].b;   // LED 0
-    package1[27] = colors[5].r;  package1[28] = colors[5].g;  package1[29] = colors[5].b;   // LED 5
-    package1[30] = colors[10].r; package1[31] = colors[10].g; package1[32] = colors[10].b;  // LED 10
-    package1[33] = colors[15].r; package1[34] = colors[15].g; package1[35] = colors[15].b;  // LED 15
-    package1[36] = colors[20].r; package1[37] = colors[20].g; package1[38] = colors[20].b;  // LED 20
-    
-    // Column 2: LED indices 1, 6, 11, 16, 21
-    package1[39] = colors[1].r;  package1[40] = colors[1].g;  package1[41] = colors[1].b;   // LED 1
-    package1[42] = colors[6].r;  package1[43] = colors[6].g;  package1[44] = colors[6].b;   // LED 6
-    package1[45] = colors[11].r; package1[46] = colors[11].g; package1[47] = colors[11].b;  // LED 11
-    package1[48] = colors[16].r; package1[49] = colors[16].g; package1[50] = colors[16].b;  // LED 16
-    package1[51] = colors[21].r; package1[52] = colors[21].g; package1[53] = colors[21].b;  // LED 21
-    
-    // Column 3: LED indices 2, 7, 12, 17 (partial - only 4 complete LEDs fit)
-    package1[54] = colors[2].r;  package1[55] = colors[2].g;  package1[56] = colors[2].b;   // LED 2
-    package1[57] = colors[7].r;  package1[58] = colors[7].g;  package1[59] = colors[7].b;   // LED 7
-    package1[60] = colors[12].r; package1[61] = colors[12].g; package1[62] = colors[12].b;  // LED 12
-    package1[63] = colors[17].r; // LED 17 (partial - only red channel fits)
-    
-    // COMMAND 3: Package 2 of 2 (0x56 0x83 0x01)
-    uint8_t package2[64] = {0};
-    package2[0] = 0x56;  // Vendor ID
-    package2[1] = 0x83;  // LED package command
-    package2[2] = 0x01;  // Package 2 indicator
-    package2[3] = 0x00;
-    
-    // *** PACKAGE 2: DIRECT ASSIGNMENTS FOR MAXIMUM PERFORMANCE ***
-    // Complete LED 17 (green, blue channels from Package 1)
-    package2[4] = colors[17].g;  // LED 17 green
-    package2[5] = colors[17].b;  // LED 17 blue
-    
-    // LED 22 
-    package2[6] = colors[22].r;  package2[7] = colors[22].g;  package2[8] = colors[22].b;   // LED 22
-    
-    // Column 4: LED indices 3, 8, 13, 18, 23
-    package2[9] = colors[3].r;   package2[10] = colors[3].g;  package2[11] = colors[3].b;   // LED 3
-    package2[12] = colors[8].r;  package2[13] = colors[8].g;  package2[14] = colors[8].b;   // LED 8
-    package2[15] = colors[13].r; package2[16] = colors[13].g; package2[17] = colors[13].b;  // LED 13
-    package2[18] = colors[18].r; package2[19] = colors[18].g; package2[20] = colors[18].b;  // LED 18
-    package2[21] = colors[23].r; package2[22] = colors[23].g; package2[23] = colors[23].b;  // LED 23
-    
-    // Column 5: LED indices 4, 9, 14, 19 (only 4 LEDs - there is no LED 24)
-    package2[24] = colors[4].r;  package2[25] = colors[4].g;  package2[26] = colors[4].b;   // LED 4
-    package2[27] = colors[9].r;  package2[28] = colors[9].g;  package2[29] = colors[9].b;   // LED 9
-    package2[30] = colors[14].r; package2[31] = colors[14].g; package2[32] = colors[14].b;  // LED 14
-    package2[33] = colors[19].r; package2[34] = colors[19].g; package2[35] = colors[19].b;  // LED 19
-    
-    // *** PACKAGE2 BYTES 36-63 AUTO-FILLED WITH 0x00 BY INITIALIZATION ***
-    // uint8_t package2[64] = {0} ensures all 64 bytes are zero-filled
-    
-    // COMMAND 4: Apply command (0x41 0x80)
-    uint8_t apply1[64] = {0};
-    apply1[0] = 0x41;
-    apply1[1] = 0x80;
-    
-    // COMMAND 5: Final apply with brightness (0x51 0x28)  
-    uint8_t apply2[64] = {0};
-    apply2[0] = 0x51;
-    apply2[1] = 0x28;
-    apply2[4] = 0xFF; // Brightness
-    
-    // *** SPLIT ATOMIC ENQUEUING: LED data (2 packets) + Both apply commands (2 singles) ***
-    bool ledSuccess = ledQueue.enqueueLEDData(package1, package2, priority);
-    bool applySuccess1 = false, applySuccess2 = false;
-    
-    if (ledSuccess) {
-        // Send both apply commands - both are essential for LEDs to work
-        applySuccess1 = ledQueue.enqueueSingle(apply1, 3, priority);
-        applySuccess2 = ledQueue.enqueueSingle(apply2, 4, priority);
+    // *** TEST: Try sending activation + custom mode before LED commands ***
+    static bool firstTime = true;
+    if (firstTime) {
+        Serial.println("🔄 First LED update - sending activation + custom mode...");
+        sendActivationSequence();
+        ARMTimer::blockingDelayMicros(100000); // 100ms - only for activation
+        setCustomMode();
+        ARMTimer::blockingDelayMicros(50000); // 50ms - only for activation
+        firstTime = false;
+        Serial.println("✅ Activation completed for LED updates");
     }
     
-    bool success = ledSuccess && applySuccess1 && applySuccess2;
+    // *** RATE LIMITING: Prevent flooding the queue ***
+    static uint32_t lastLEDUpdateTime = 0;
+    uint32_t currentTime = ARMTimer::getMicros();
+    if ((currentTime - lastLEDUpdateTime) < 20000) { // Minimum 20ms between updates
+        return false;
+    }
+    lastLEDUpdateTime = currentTime;
     
-    // Only log failures and high-priority events to reduce serial overhead
-    if (!success) {
-        if (!ledSuccess) {
-            Serial.printf("❌ LED data FAILED - queue full (%s)\n", priorityStr);
+    // *** DIAGNOSTIC: Check queue status before enqueuing ***
+    uint8_t queueSizeBefore = ledQueue.size();
+    bool queueFullBefore = ledQueue.isFull();
+    
+    if (queueFullBefore) {
+        // Debug removed to prevent timing issues
+        return false; // Don't enqueue anything if queue is full
+    }
+    
+    // *** BYPASS QUEUE - SEND DIRECTLY TO ELIMINATE STARVATION ***
+    uint32_t updateStart = ARMTimer::getMicros();
+    
+    // *** SIMPLIFIED TIMING - NO COMPENSATION ***
+    
+retry_packets:  // Retry label for timeout loop
+    // Packet 1: LED data package 1 - INDIVIDUAL PACKET RETRY LOGIC
+    int pkt1Retries = 0;
+    uint32_t pkt1TransmitTime = 0;
+    bool success1 = false;
+    
+retry_p1:
+    uint32_t pkt1Start = ARMTimer::getMicros();
+    success1 = sendCommand(pkg1, 64);
+    uint32_t pkt1End = ARMTimer::getMicros();
+    pkt1TransmitTime = pkt1End - pkt1Start;
+    
+    // CRITICAL: Ensure P1 is actually transmitted - retry if needed
+    int retryCount = 0;
+    while (pkt1TransmitTime == 0 && success1 && retryCount < 3) {
+        // USB controller queued it - wait and retry to ensure transmission
+        ARMTimer::blockingDelayMicros(40);
+        pkt1End = ARMTimer::getMicros();
+        pkt1TransmitTime = pkt1End - pkt1Start;
+        retryCount++;
+    }
+    
+    if (pkt1TransmitTime == 0 || !success1) {
+        Serial.printf("❌ P1 FAILED after %d retries - aborting LED update\n", retryCount);
+        return false; // Abort entire update if P1 fails
+    }
+    
+    // Check P1 timing - retry up to 4 times if slow
+    if (pkt1TransmitTime > 60) {
+        pkt1Retries++;
+        if (pkt1Retries <= 4) {
+            Serial.printf("⏰ P1 timeout (attempt %d/4) - %dμs, retrying in 1ms\n", pkt1Retries, pkt1TransmitTime);
+            ARMTimer::blockingDelayMicros(990);
+            goto retry_p1;
         } else {
-            Serial.printf("❌ Apply commands FAILED (%s)\n", priorityStr);
+            Serial.printf("❌ P1 failed after 4 retries - all attempts >60μs\n");
+            return false;
         }
-    } else if (priority) {
-        Serial.printf("🚀 HIGH PRIORITY sequence (4 packets) enqueued (%s)\n", priorityStr);
     }
     
-    bool overall = success;
-    return overall;
+    // Fine-tuned timing compensation (985μs to target ~3000μs total)
+    ARMTimer::blockingDelayMicros(985);
+    
+    // Packet 2: LED data package 2 - INDIVIDUAL PACKET RETRY LOGIC
+    int pkt2Retries = 0;
+    uint32_t pkt2TransmitTime = 0;
+    bool success2 = false;
+    
+retry_p2:
+    uint32_t pkt2Start = ARMTimer::getMicros();
+    success2 = sendCommand(pkg2, 64);
+    uint32_t pkt2End = ARMTimer::getMicros();
+    pkt2TransmitTime = pkt2End - pkt2Start;
+    
+    // CRITICAL: Ensure P2 is actually transmitted - retry if needed
+    retryCount = 0;
+    while (pkt2TransmitTime == 0 && success2 && retryCount < 3) {
+        // USB controller queued it - wait and retry to ensure transmission  
+        ARMTimer::blockingDelayMicros(40);
+        pkt2End = ARMTimer::getMicros();
+        pkt2TransmitTime = pkt2End - pkt2Start;
+        retryCount++;
+    }
+    
+    if (pkt2TransmitTime == 0 || !success2) {
+        Serial.printf("❌ P2 FAILED after %d retries - aborting LED update\n", retryCount);
+        return false; // Abort entire update if P2 fails
+    }
+    
+    // Check P2 timing - retry up to 4 times if slow
+    if (pkt2TransmitTime > 60) {
+        pkt2Retries++;
+        if (pkt2Retries <= 4) {
+            Serial.printf("⏰ P2 timeout (attempt %d/4) - %dμs, retrying in 1ms\n", pkt2Retries, pkt2TransmitTime);
+            ARMTimer::blockingDelayMicros(998);
+            goto retry_p2;
+        } else {
+            Serial.printf("❌ P2 failed after 4 retries - all attempts >60μs\n");
+            return false;
+        }
+    }
+    
+    // Fine-tuned timing compensation (985μs to target ~3000μs total)
+    ARMTimer::blockingDelayMicros(985);
+    
+    // *** CORRECT APPLY COMMANDS FROM WORKING IMPLEMENTATION ***
+    
+    // Command 4: Apply command (4180 0000) - INDIVIDUAL PACKET RETRY LOGIC
+    uint8_t applyCmd[64] = {0};
+    applyCmd[0] = 0x41; applyCmd[1] = 0x80;
+    applyCmd[2] = 0x00; applyCmd[3] = 0x00;
+    
+    int pkt3Retries = 0;
+    uint32_t pkt3TransmitTime = 0;
+    bool success3 = false;
+    
+retry_p3:
+    uint32_t pkt3Start = ARMTimer::getMicros();
+    success3 = sendCommand(applyCmd, 64);
+    uint32_t pkt3End = ARMTimer::getMicros();
+    pkt3TransmitTime = pkt3End - pkt3Start;
+    
+    // CRITICAL: Ensure P3 is actually transmitted - retry if needed
+    retryCount = 0;
+    while (pkt3TransmitTime == 0 && success3 && retryCount < 3) {
+        // USB controller queued it - wait and retry to ensure transmission
+        ARMTimer::blockingDelayMicros(40);
+        pkt3End = ARMTimer::getMicros();
+        pkt3TransmitTime = pkt3End - pkt3Start;
+        retryCount++;
+    }
+    
+    if (pkt3TransmitTime == 0 || !success3) {
+        Serial.printf("❌ P3 FAILED after %d retries - aborting LED update\n", retryCount);
+        return false; // Abort entire update if P3 fails
+    }
+    
+    // Check P3 timing - retry up to 4 times if slow
+    if (pkt3TransmitTime > 60) {
+        pkt3Retries++;
+        if (pkt3Retries <= 4) {
+            Serial.printf("⏰ P3 timeout (attempt %d/4) - %dμs, retrying in 1ms\n", pkt3Retries, pkt3TransmitTime);
+            ARMTimer::blockingDelayMicros(998);
+            goto retry_p3;
+        } else {
+            Serial.printf("❌ P3 failed after 4 retries - all attempts >60μs\n");
+            return false;
+        }
+    }
+    
+    // Fine-tuned timing compensation (985μs to target ~3000μs total)
+    ARMTimer::blockingDelayMicros(985);
+    
+    // Command 5: Finalize command (5128 0000 ff00) - INDIVIDUAL PACKET RETRY LOGIC
+    uint8_t finalizeCmd[64] = {0};
+    finalizeCmd[0] = 0x51; finalizeCmd[1] = 0x28;
+    finalizeCmd[2] = 0x00; finalizeCmd[3] = 0x00;
+    finalizeCmd[4] = 0xFF; finalizeCmd[5] = 0x00;
+    
+    int pkt4Retries = 0;
+    uint32_t pkt4TransmitTime = 0;
+    bool success4 = false;
+    
+retry_p4:
+    uint32_t pkt4Start = ARMTimer::getMicros();
+    success4 = sendCommand(finalizeCmd, 64);
+    uint32_t pkt4End = ARMTimer::getMicros();
+    pkt4TransmitTime = pkt4End - pkt4Start;
+    
+    // CRITICAL: Ensure P4 is actually transmitted - retry if needed
+    retryCount = 0;
+    while (pkt4TransmitTime == 0 && success4 && retryCount < 3) {
+        // USB controller queued it - wait and retry to ensure transmission
+        ARMTimer::blockingDelayMicros(40);
+        pkt4End = ARMTimer::getMicros();
+        pkt4TransmitTime = pkt4End - pkt4Start;
+        retryCount++;
+    }
+    
+    if (pkt4TransmitTime == 0 || !success4) {
+        Serial.printf("❌ P4 FAILED after %d retries - aborting LED update\n", retryCount);
+        return false; // Abort entire update if P4 fails
+    }
+    
+    // Check P4 timing - retry up to 4 times if slow
+    if (pkt4TransmitTime > 60) {
+        pkt4Retries++;
+        if (pkt4Retries <= 4) {
+            Serial.printf("⏰ P4 timeout (attempt %d/4) - %dμs, retrying in 1ms\n", pkt4Retries, pkt4TransmitTime);
+            ARMTimer::blockingDelayMicros(998);
+            goto retry_p4;
+        } else {
+            Serial.printf("❌ P4 failed after 4 retries - all attempts >60μs\n");
+            return false;
+        }
+    }
+    
+    // All packets succeeded with acceptable timing!
+    
+    uint32_t updateEnd = ARMTimer::getMicros();
+    uint32_t updateDuration = updateEnd - updateStart;
+    
+    // Simple logging without timing analysis
+    Serial.printf("📦 Packet timings - P1: %dμs, P2: %dμs, P3: %dμs, P4: %dμs, Total: %dμs\n",
+                 pkt1TransmitTime, pkt2TransmitTime, pkt3TransmitTime, pkt4TransmitTime, updateDuration);
+    
+    // Only log slow LED updates (over 10ms)
+    if (updateDuration > 10000) {
+        Serial.printf("⏱️ LED update took: %dms\n", updateDuration / 1000);
+    }
+    
+    // *** DIAGNOSTIC: Show queue status after enqueuing ***
+    uint8_t queueSizeAfter = ledQueue.size();
+    // Debug removed to prevent timing issues
+    
+
+    
+    if (success1 && success2 && success3 && success4) {
+        // Debug removed to prevent timing issues
+        
+        // Debug removed to prevent timing issues
+        
+        return true;
+    } else {
+        // Debug removed to prevent timing issues
+        return false;
+    }
 }
 
 // *** REMOVED ALL COMPLEX LED METHODS ***
@@ -846,7 +1002,7 @@ bool USBControlPad::updateAllLEDs(const ControlPadColor* colors, size_t count, b
 
 // Essential LED command functions using HID output reports
 bool USBControlPad::setCustomMode() {
-    Serial.printf("🎨 setCustomMode: Setting device to custom LED mode (CORRECT FORMAT)...\n");
+    // Serial.printf("🎨 setCustomMode: Setting device to custom LED mode (CORRECT FORMAT)...\n");
     
     // COMMAND 1: Set effect mode (from user documentation)
     // 56 81 0000 01000000 02000000 bbbbbbbb (custom mode) + trailing zeros
@@ -855,7 +1011,7 @@ bool USBControlPad::setCustomMode() {
     cmd[1] = 0x81;  // Set effect command
     cmd[2] = 0x00;  // 0000
     cmd[3] = 0x00;
-    cmd[4] = 0x01;  // 01000000
+    cmd[4] = 0x01;  // 01000000 = activate
     cmd[5] = 0x00;
     cmd[6] = 0x00;
     cmd[7] = 0x00;
@@ -869,11 +1025,11 @@ bool USBControlPad::setCustomMode() {
     cmd[15] = 0xBB;
     // Rest remains zeros
     
-    Serial.printf("🎨 Custom mode command: 0x%02X 0x%02X (CORRECT custom mode setup)\n", 
-                 cmd[0], cmd[1]);
+    // Serial.printf("🎨 Custom mode command: 0x%02X 0x%02X (CORRECT custom mode setup)\n", 
+    //              cmd[0], cmd[1]);
     
     bool result = sendCommand(cmd, 64);
-    Serial.printf("🎨 setCustomMode result: %s\n", result ? "SUCCESS" : "FAILED");
+    // Serial.printf("🎨 setCustomMode result: %s\n", result ? "SUCCESS" : "FAILED");
     return result;
 }
 
@@ -881,6 +1037,7 @@ bool USBControlPad::setCustomMode() {
 // Keeping only the essential activation and the simplified updateAllLEDs
 
 bool USBControlPad::sendActivationSequence() {
+    Serial.println("🔧 Starting activation sequence...");
     // Based on the original working activation sequence
     bool success = true;
     
@@ -888,31 +1045,36 @@ bool USBControlPad::sendActivationSequence() {
     uint8_t cmd1[64] = {0x42, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01};
     bool step1 = sendCommand(cmd1, 64);
     success &= step1;
-    if (step1) delay(100); // Allow device to process
+    if (step1) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
     
     // Step 2: 0x42 10 variant  
     uint8_t cmd2[64] = {0x42, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01};
     bool step2 = sendCommand(cmd2, 64);
     success &= step2;
-    if (step2) delay(100); // Allow device to process
+    if (step2) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
     
     // Step 3: 0x43 00 button activation
     uint8_t cmd3[64] = {0x43, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
     bool step3 = sendCommand(cmd3, 64);
     success &= step3;
-    if (step3) delay(100); // Allow device to process
+    if (step3) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
     
     // Step 4: 0x41 80 status
     uint8_t cmd4[64] = {0x41, 0x80, 0x00, 0x00};
     bool step4 = sendCommand(cmd4, 64);
     success &= step4;
-    if (step4) delay(100); // Allow device to process
+    if (step4) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
     
     // Step 5: 0x52 00 activate effect modes
     uint8_t cmd5[64] = {0x52, 0x00, 0x00, 0x00};
     bool step5 = sendCommand(cmd5, 64);
     success &= step5;
-    if (step5) delay(100); // Allow device to process
+    if (step5) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
+
+        uint8_t cmd6[64] = {0x41, 0x80, 0x00, 0x00};
+    bool step6 = sendCommand(cmd6, 64);
+    success &= step6;
+    if (step6) ARMTimer::blockingDelayMicros(999); // Allow device to process (999μs)
     
     if (!success) {
         Serial.println("⚠️ Activation sequence failed");
@@ -923,7 +1085,7 @@ bool USBControlPad::sendActivationSequence() {
 // ===== PUBLIC LED QUEUE ACCESS FOR MONITORING =====
 void getLEDQueueStatus(size_t* queueSize, bool* isProcessing) {
     if (queueSize) *queueSize = ledQueue.size();
-    if (isProcessing) *isProcessing = ledQueue.isProcessing();
+    if (isProcessing) *isProcessing = false; // Simplified queue doesn't track processing state
 }
 
 // ===== HARDWARE MANAGER IMPLEMENTATION =====
@@ -942,14 +1104,8 @@ bool ControlPadHardware::begin(ControlPad& pad) {
     // Store reference to the ControlPad instance
     currentPad = &pad;
     
-    // 1. Initialize DMA queues
-    if (!controlpad_queue.begin()) {
-        return false;
-    }
-    
-    if (!led_command_queue.begin()) {
-        return false;
-    }
+    // 1. Initialize simplified queues
+    Serial.println("✅ LED queue initialized");
     
     // 2. Use global USB Host and Driver (USBHost_t36 standard pattern)
     // USB Host is already started in main.cpp
@@ -958,16 +1114,16 @@ bool ControlPadHardware::begin(ControlPad& pad) {
     for (int i = 0; i < 100; i++) {  // Allow up to 10 seconds for enumeration
         globalUSBHost.Task();  // This processes USB enumeration and calls claim()
         
-        delay(100);
+        ARMTimer::blockingDelayMicros(100000); // 100ms
         if (globalControlPadDriver.device_) {
             break;
         }
     }
     
-    // 4. Wait for device enumeration
-    unsigned long startTime = millis();
-    while (!globalControlPadDriver.device_ && (millis() - startTime) < 10000) {
-        delay(100);
+    // 4. Wait for device enumeration using ARM timer
+    uint32_t startTime = ARMTimer::getMicros();
+    while (!globalControlPadDriver.device_ && (ARMTimer::getMicros() - startTime) < 10000000) {
+        ARMTimer::blockingDelayMicros(100000); // 100ms
     }
     
     if (!globalControlPadDriver.device_) {
@@ -975,17 +1131,32 @@ bool ControlPadHardware::begin(ControlPad& pad) {
     }
     
     // 5. Wait for USB configuration to stabilize
-    delay(2000);
+    ARMTimer::blockingDelayMicros(2000000); // 2 seconds
     
     // 6. Initialize the driver
-    bool initResult = globalControlPadDriver.begin(&controlpad_queue);
+    bool initResult = globalControlPadDriver.begin();
     if (!initResult) {
         return false;
     }
     
-    // 7. Set device to custom LED mode once during initialization
-    globalControlPadDriver.setCustomMode();
-        delay(50); // Allow mode change to complete
+    // 7. Send activation sequence and set custom mode
+    Serial.println("🚀 Sending device activation sequence...");
+    bool activationResult = globalControlPadDriver.sendActivationSequence();
+    if (activationResult) {
+        Serial.println("✅ Activation sequence completed successfully");
+        ARMTimer::blockingDelayMicros(100000); // 100ms for activation to settle
+        
+        Serial.println("🎨 Setting device to custom LED mode...");
+        bool customModeResult = globalControlPadDriver.setCustomMode();
+        if (customModeResult) {
+            Serial.println("✅ Custom mode activated successfully");
+        } else {
+            Serial.println("⚠️ Custom mode activation failed");
+        }
+        ARMTimer::blockingDelayMicros(50000); // Allow mode change to complete (50ms)
+    } else {
+        Serial.println("❌ Activation sequence failed");
+    }
     
     return true;
 }
@@ -1002,7 +1173,7 @@ void ControlPadHardware::poll() {
 bool ControlPadHardware::setAllLeds(const ControlPadColor* colors, size_t count) {
     // *** NON-BLOCKING LED UPDATE FOR MIDI TIMING ***
     // Simple, fast LED update using USBHost_t36's built-in capabilities
-    return globalControlPadDriver.updateAllLEDs(colors, count);
+    return globalControlPadDriver.updateAllLEDs(colors, count, false);
 }
 
 // *** DUPLICATE CLASS DEFINITION REMOVED - NOW DEFINED EARLIER IN FILE ***
@@ -1025,16 +1196,85 @@ void ControlPadHardware::updateButtonHighlights() {
 }
 
 void ControlPadHardware::updateUnifiedLEDs() {
-    // Check if we need to send an LED update
-    if (ledManager.shouldSendUpdate()) {
+    // *** NEW 1MS-TIMED QUEUE PROCESSING ***
+    // Debug removed to prevent timing issues
+    
+    ledTimingController.processTimedSending(); // Process queued LED commands with 1ms timing
+    
+    // *** CHECK BOTH LED SYSTEMS ***
+    
+    // 1. Check the UnifiedLEDManager (if animation enabled)
+    if (ledManager.isAnimationEnabled() && ledManager.shouldSendUpdate()) {
         const ControlPadColor* ledState = ledManager.getLEDState();
-        bool success = globalControlPadDriver.updateAllLEDs(ledState, 24, false); // NORMAL PRIORITY
+        bool success = globalControlPadDriver.updateAllLEDs(ledState, 24, false);
         if (!success) {
-            Serial.println("⚠️ Unified LED update failed to queue");
+            // LED update failure logging disabled to prevent timing issues
         }
+    }
+    
+    // 2. Check the old ControlPad system (if there are changes from setAllButtonColors)
+    if (currentPad && currentPad->hasLedChanges()) {
+        Serial.println("🎨 Detected LED changes from setAllButtonColors - sending to queue...");
+        // Use the old system but it will go through the queue now
+        currentPad->updateSmartLeds(); // This should use the queue system
     }
 }
 
 bool ControlPadHardware::isAnimationEnabled() const {
     return ledManager.isAnimationEnabled();
+}
+
+// ===== LED TIMING CONTROLLER IMPLEMENTATION =====
+void LEDTimingController::processTimedSending() {
+    // Minimal debug: Track queue empty events
+    static uint32_t lastEmptyWarning = 0;
+    static bool wasEmpty = true; // Track when queue transitions from full to empty
+    
+    if (!enabled) {
+        // Show once that timing controller is disabled
+        static bool disabledWarningShown = false;
+        if (!disabledWarningShown) {
+            Serial.println("⚠️ LEDTimingController is DISABLED");
+            disabledWarningShown = true;
+        }
+        return;
+    }
+    
+    uint32_t currentTime = ARMTimer::getMicros();
+    
+    // Only send if enough time has passed AND we have packets
+    if ((currentTime - lastSendTime >= sendIntervalMicros)) {
+        uint8_t packet[64];
+        if (queue.dequeue(packet)) {
+            // Detect queue starvation recovery
+            if (wasEmpty) {
+                Serial.printf("✅ Queue recovered (size: %d)\n", queue.size());
+                wasEmpty = false;
+            }
+            
+            // Send the packet
+            if (globalControlPadDriver.isDeviceConnected()) {
+                                    bool success = globalControlPadDriver.sendCommand(packet, 64);
+                    if (success) {
+                        lastSendTime = currentTime;
+                        // Debug removed to prevent timing issues
+                    }
+            } else {
+                Serial.println("❌ Timing controller: Device not connected");
+            }
+        } else {
+            // Queue is empty - detect starvation
+            if (!wasEmpty) {
+                Serial.printf("🚨 QUEUE STARVED! Animation timing issue?\n");
+                wasEmpty = true;
+            }
+            
+            // Show long-term empty status occasionally
+                          static uint32_t lastEmptyLocalWarning = 0;
+              if ((currentTime - lastEmptyLocalWarning) > 5000000) { // Every 5 seconds
+                  Serial.printf("⚠️ Queue empty for >5sec\n");
+                  lastEmptyLocalWarning = currentTime;
+              }
+        }
+    }
 }

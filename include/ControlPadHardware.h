@@ -16,79 +16,107 @@
 #define EP_OUT          0x04  // Interrupt OUT endpoint for commands
 #define EP_IN           0x83  // Interrupt IN endpoint for responses
 
-// ===== DMA-BASED QUEUE SYSTEM =====
-// Custom queue implementation using Teensy's DMA and EventResponder
-template<typename T, size_t SIZE>
-class DMAQueue {
+// ===== TEENSY EVENTRESPONDER QUEUE SYSTEM =====
+// Use Teensy's built-in EventResponder for atomic queue operations
+
+struct QueuedLEDCommand {
+    uint8_t data[64];
+    size_t length;
+    uint8_t commandType;    // 1 = pkg1, 2 = pkg2, etc
+    bool priority;
+};
+
+// ===== SIMPLE PACKET QUEUE =====
+// Clean, simple queue for 64-byte LED command packets
+class LEDPacketQueue {
 private:
-    T buffer[SIZE];
-    volatile size_t head = 0;
-    volatile size_t tail = 0;
-    volatile size_t count = 0;
-    DMAChannel dmaChannel;
-    EventResponder eventResponder;
-    void (*callback)(void) = nullptr;
+    static const size_t MAX_PACKETS = 32;  // Larger queue to handle bursts of 4 packets
+    uint8_t packets[MAX_PACKETS][64];      // Store 64-byte command packets
+    volatile uint8_t head = 0;
+    volatile uint8_t tail = 0;
+    volatile uint8_t count = 0;
     
 public:
-    bool begin() {
-        head = 0;
-        tail = 0;
-        count = 0;
-        return true;
-    }
-    
-    bool put(const T& item, uint32_t timeout_ms = 0) {
-        uint32_t start = millis();
-        while (count >= SIZE) {
-            if (timeout_ms && (millis() - start) > timeout_ms) {
-                return false;
-            }
-            yield();
+    LEDPacketQueue() : head(0), tail(0), count(0) {}
+
+    bool enqueue(const uint8_t* packet) {
+        __disable_irq();
+        if (count >= MAX_PACKETS) {
+            __enable_irq();
+            return false;  // Queue full
         }
         
-        __disable_irq();
-        buffer[head] = item;
-        head = (head + 1) % SIZE;
+        memcpy(packets[tail], packet, 64);
+        tail = (tail + 1) % MAX_PACKETS;
         count++;
         __enable_irq();
-        
-        if (callback) {
-            eventResponder.triggerEvent();
-        }
-        
         return true;
     }
-    
-    bool get(T& item, uint32_t timeout_ms = 0) {
-        uint32_t start = millis();
-        while (count == 0) {
-            if (timeout_ms && (millis() - start) > timeout_ms) {
-                return false;
-            }
-            yield();
+
+    bool dequeue(uint8_t* packet) {
+        __disable_irq();
+        if (count == 0) {
+            __enable_irq();
+            return false;  // Queue empty
         }
         
-        __disable_irq();
-        item = buffer[tail];
-        tail = (tail + 1) % SIZE;
+        memcpy(packet, packets[head], 64);
+        head = (head + 1) % MAX_PACKETS;
         count--;
         __enable_irq();
-        
         return true;
     }
-    
-    bool isEmpty() const { return count == 0; }
-    bool isFull() const { return count >= SIZE; }
-    size_t available() const { return count; }
-    
-    void attachCallback(void (*cb)(void)) {
-        callback = cb;
-        // Use lambda capture to make callback accessible in the EventResponder context
-        auto savedCallback = callback;
-        eventResponder.attach([savedCallback](EventResponder &resp) {
-            if (savedCallback) savedCallback();
-        });
+
+    bool isFull() const { 
+        __disable_irq();
+        bool result = (count == MAX_PACKETS);
+        __enable_irq();
+        return result;
     }
+    
+    bool isEmpty() const { 
+        __disable_irq();
+        bool result = (count == 0);
+        __enable_irq();
+        return result;
+    }
+    
+    uint8_t size() const { 
+        __disable_irq();
+        uint8_t result = count;
+        __enable_irq();
+        return result;
+    }
+};
+
+// ===== LED TIMING CONTROLLER =====
+// Handles precise 1ms timing for LED packet transmission
+class LEDTimingController {
+private:
+    LEDPacketQueue& queue;
+    uint32_t lastSendTime;
+    uint32_t sendIntervalMicros;  // Make this configurable instead of const
+    bool enabled;
+    
+public:
+    LEDTimingController(LEDPacketQueue& q) : queue(q), lastSendTime(0), sendIntervalMicros(12500), enabled(false) {}  // DISABLED - bypassing queue
+    
+    // Call this regularly from main loop
+    void processTimedSending();  // Implementation moved to .cpp file
+    
+    // Change timing interval if needed
+    void setIntervalMicros(uint32_t micros) {
+        sendIntervalMicros = micros;
+    }
+    
+    void enable() { enabled = true; }
+    void disable() { enabled = false; }
+    bool isEnabled() const { return enabled; }
+    
+    // Get queue status
+    uint8_t getQueueSize() const { return queue.size(); }
+    bool isQueueEmpty() const { return queue.isEmpty(); }
+    bool isQueueFull() const { return queue.isFull(); }
 };
 
 // ===== CONTROLPAD PROTOCOL STRUCTURES =====
@@ -161,7 +189,7 @@ private:
     uint8_t sensor_out_report[32] __attribute__((aligned(32)));  // For endpoint 0x07
     
     uint8_t report_len = 64;
-    DMAQueue<controlpad_event, 16>* queue = nullptr;
+    void* queue = nullptr;  // Legacy queue pointer (unused with EventResponder)
 
     // Pipe tracking for different interfaces
     Pipe_t *kbd_pipe = nullptr;
@@ -223,7 +251,7 @@ private:
     
 public:
     // USB driver functionality
-    bool begin(DMAQueue<controlpad_event, 16> *q);
+    bool begin();  // Simplified - no queue parameter needed
     bool sendActivationSequence();
     void setupQuadInterface();
     void startQuadPolling();
@@ -243,14 +271,18 @@ public:
     bool sendLEDPackage2(const ControlPadColor* colors); // Deprecated - use sendLEDPackages instead
     bool sendApplyCommand();
     bool sendFinalizeCommand();
-    bool updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority = false);
+    bool updateAllLEDs(const ControlPadColor* colors, size_t count, bool priority = false, uint32_t retryStartTime = 0);
     
     // 🚀 ATOMIC LED UPDATE IMPLEMENTATION - USB Interference Prevention
     void pauseUSBPolling();
     void resumeUSBPolling();
+    
+    // ===== USB DEVICE STATE MONITORING =====
+    bool isDeviceConnected() const { return device_ != nullptr; }
+    Device_t* getDevice() const { return device_; }
 
     // ===== QUEUE-BASED LED SYSTEM FOR MIDI TIMING =====
-    // Uses DMA-based queue system with EventResponder underneath
+    // Uses EventResponder-based queue system
     bool queueLEDUpdate(const ControlPadColor* colors, size_t count);
     void processLEDCommandQueue(); // Call this in main loop
     
@@ -258,7 +290,6 @@ public:
     // Non-blocking LED updates that don't interfere with MIDI timing
     bool startAsyncLEDUpdate(const ControlPadColor* colors, size_t count);
     bool isLEDUpdateInProgress();
-    // processAsyncLEDUpdate removed - using direct USBHost_t36 transfers
     
     // Friend class for hardware manager access
     friend class ControlPadHardware;
@@ -281,7 +312,6 @@ public:
 
     // Only called by API layer
     bool setAllLeds(const ControlPadColor* colors, size_t count);
-    //void setFastMode(bool enabled);  // Enable/disable fast mode for rapid updates
     
     // *** ANIMATION SYSTEM ***
     void enableAnimation();
@@ -294,16 +324,12 @@ public:
     // Reference to the ControlPad instance for event callbacks (made public for USB callbacks)
     ControlPad* currentPad = nullptr;
 
-    // DMA-based Queue for events
-    DMAQueue<controlpad_event, 16> controlpad_queue;
-
-    // LED Command Queue for MIDI-timing-friendly updates
-    DMAQueue<led_command_event, 32> led_command_queue;
+    // ===== SIMPLIFIED EVENT HANDLING =====
+    // Using EventResponder instead of DMAQueue
+    void processControlPadEvent(const uint8_t* data, size_t length);
     void prepareLEDCommands(const ControlPadColor* colors, led_command_event* commands);
 
 private:
-    // No longer need local USB Host/Driver - using global objects for USBHost_t36 compatibility
-    
     // DMA for LED updates
     DMAChannel ledDMAChannel;
     DMALEDUpdate dmaLEDBuffer __attribute__((aligned(32)));
