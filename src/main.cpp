@@ -174,6 +174,14 @@ void setup() {
 // *** MAIN LOOP STATE VARIABLES ***
 static uint8_t animationStep = 0;
 
+// *** USB FRAME-BASED TIMING HELPERS ***
+// Convert milliseconds to USB frames (1 frame ≈ 1ms)
+#define FRAMES_TO_MS(frames) (frames)
+#define MS_TO_FRAMES(ms) (ms)
+
+// Declare external USB frame timing function
+extern uint32_t getUSBFrameTime();
+
 void loop() {
     // *** UCLOCK INTERRUPT-BASED ANIMATION SYSTEM (doctea approach) ***
     static bool uclockAnimationInitialized = false;
