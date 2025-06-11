@@ -626,18 +626,20 @@ bool sendPacketWithRetry(const uint8_t* packet, size_t length, const char* packe
     
     for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         uint32_t frameStart = getUSBFrameNumber();
-        uint32_t startTime = micros();
+        uint32_t startCycles = ARMTimer::getCycles();
         
         bool success = globalControlPadDriver.sendCommand(packet, length);
         
         if (success) {
-            // Force USB transmission with busy-wait
-            uint32_t busyWaitStart = micros();
-            while ((micros() - busyWaitStart) < 150) {
+            // Force USB transmission with busy-wait using cycle counter
+            uint32_t busyWaitStartCycles = ARMTimer::getCycles();
+            uint32_t busyWaitCycles = 150 * (F_CPU_ACTUAL / 1000000); // 150μs in cycles
+            while ((ARMTimer::getCycles() - busyWaitStartCycles) < busyWaitCycles) {
                 globalUSBHost.Task();
             }
             
-            uint32_t totalTime = micros() - startTime;
+            uint32_t endCycles = ARMTimer::getCycles();
+            uint32_t totalTime = (endCycles - startCycles) / (F_CPU_ACTUAL / 1000000); // Convert to μs
             uint32_t frameEnd = getUSBFrameNumber();
             *transmitTime = totalTime;
             
@@ -652,13 +654,13 @@ bool sendPacketWithRetry(const uint8_t* packet, size_t length, const char* packe
                 Serial.printf("⚠️ %s timing high (%dμs), retrying... (attempt %d/%d)\n", 
                              packetName, totalTime, attempt + 1, MAX_RETRIES + 1);
                 
-                // Brief delay before retry
-                delayMicroseconds(200);
+                // Brief delay before retry using high-precision ARM timer
+                ARMTimer::blockingDelayMicros(200);
             }
         } else {
             Serial.printf("❌ %s packet failed on attempt %d\n", packetName, attempt + 1);
             if (attempt < MAX_RETRIES) {
-                delayMicroseconds(200); // Brief delay before retry
+                ARMTimer::blockingDelayMicros(200); // Brief delay before retry using ARM timer
             }
         }
     }
@@ -676,7 +678,7 @@ bool usbFrameSynchronizedDelayMs(uint32_t milliseconds, bool* hasShortFrames = n
     for (uint32_t i = 0; i < milliseconds; i++) {
         uint32_t startFrame = getUSBFrameNumber();
         uint32_t startMicroframe = USB1_FRINDEX & 0x7;
-        uint32_t startTime = micros();
+        uint32_t startCycles = ARMTimer::getCycles();
         
         // Wait for next USB frame
         uint32_t currentFrame;
@@ -685,7 +687,8 @@ bool usbFrameSynchronizedDelayMs(uint32_t milliseconds, bool* hasShortFrames = n
             currentFrame = getUSBFrameNumber();
         } while (currentFrame == startFrame);
         
-        uint32_t actualDelay = micros() - startTime;
+        uint32_t endCycles = ARMTimer::getCycles();
+        uint32_t actualDelay = (endCycles - startCycles) / (F_CPU_ACTUAL / 1000000); // Convert cycles to microseconds
         uint32_t endMicroframe = USB1_FRINDEX & 0x7;
         uint32_t frameDiff = (currentFrame >= startFrame) ? 
                             (currentFrame - startFrame) : 
