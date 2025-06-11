@@ -260,9 +260,10 @@ void loop() {
                 Serial.printf("❌ LED update FAILED - frame %d, step %d (failure #%d)\n", 
                     animationStep, currentStep, consecutiveFailures);
                 
-                // After 2 consecutive failures (faster recovery), try to recover
-                if (consecutiveFailures >= 2) {
-                    Serial.printf("🔧 %d consecutive LED failures - attempting recovery\n", consecutiveFailures);
+                // More conservative recovery - avoid interfering with cleanup retries
+                // Only attempt recovery after many failures to avoid interfering with cleanup retry system
+                if (consecutiveFailures >= 10) {  // Increased from 2 to 10
+                    Serial.printf("🔧 %d consecutive LED failures - attempting device recovery\n", consecutiveFailures);
                     
                     // Try device reactivation sequence
                     globalControlPadDriver.sendActivationSequence();
