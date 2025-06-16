@@ -104,6 +104,9 @@ public:
     uint8_t getAddress() const { return bAddress; }
     const EpInfo* getEpInfo() const { return epInfo; }
     bool isInitialized() const { return initialized; }
+
+    // Control pad specific functions
+    bool setCustomMode();  // Set device to custom LED mode
 };
 
 #endif
