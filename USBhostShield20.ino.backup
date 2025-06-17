@@ -24,6 +24,7 @@ public:
     void resetToggleAfterNAK(const char* commandName);
     void setToggleForNextTransfer(uint8_t toggleState, const char* reason);
     void testLEDCommands();
+    void animateRainbowWithHighlight(); // New animation function
 
 protected:
     void ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t len, uint8_t *buf); // Called by the HIDComposite library
@@ -68,8 +69,7 @@ bool HIDSelector::initializeInterface1() {
     
     if (success) {
         Serial.println("✅ Interface 1 initialized successfully!");
-        Serial.println("🌈 Testing LED command sequence...");
-        testLEDCommands();
+        Serial.println("🚀 Interface 1 is ready for LED control!");
     } else {
         Serial.println("❌ Interface 1 initialization failed");
     }
@@ -135,11 +135,12 @@ bool HIDSelector::sendInitializationSequence() {
     Serial.print("🔍 Command 1 result: 0x");
     Serial.println(rcode, HEX);
     if (rcode && rcode != 0x4) {
-        Serial.print("❌ Command 1 failed with error: 0x");
-        Serial.println(rcode, HEX);
-        return false;
+        Serial.print("⚠️ Command 1 failed with error 0x");
+        Serial.print(rcode, HEX);
+        Serial.println(" - continuing anyway");
+    } else {
+        Serial.println("✅ Command 1 sent successfully");
     }
-    Serial.println("✅ Command 1 sent successfully");
     delay(100);
     
     // Command 2: 42 10
@@ -147,8 +148,15 @@ bool HIDSelector::sendInitializationSequence() {
     memset(cmd, 0, 64);
     cmd[0] = 0x42; cmd[1] = 0x10; cmd[4] = 0x01; cmd[7] = 0x01;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode && rcode != 0x4) { Serial.print("❌ Command 1 failed with error: 0x"); Serial.println(rcode, HEX); return false; }
-    Serial.println("✅ Command 2 sent successfully");
+    Serial.print("🔍 Command 2 result: 0x");
+    Serial.println(rcode, HEX);
+    if (rcode && rcode != 0x4) {
+        Serial.print("⚠️ Command 2 failed with error 0x");
+        Serial.print(rcode, HEX);
+        Serial.println(" - continuing anyway");
+    } else {
+        Serial.println("✅ Command 2 sent successfully");
+    }
     delay(200);
     
     // Command 3: 43 00
@@ -156,8 +164,15 @@ bool HIDSelector::sendInitializationSequence() {
     memset(cmd, 0, 64);
     cmd[0] = 0x43; cmd[1] = 0x00; cmd[4] = 0x01;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode && rcode != 0x4) { Serial.print("❌ Command 1 failed with error: 0x"); Serial.println(rcode, HEX); return false; }
-    Serial.println("✅ Command 3 sent successfully");
+    Serial.print("🔍 Command 3 result: 0x");
+    Serial.println(rcode, HEX);
+    if (rcode && rcode != 0x4) {
+        Serial.print("⚠️ Command 3 failed with error 0x");
+        Serial.print(rcode, HEX);
+        Serial.println(" - continuing anyway");
+    } else {
+        Serial.println("✅ Command 3 sent successfully");
+    }
     delay(130);
     
     // Check for setup responses
@@ -186,25 +201,6 @@ bool HIDSelector::sendInitializationSequence() {
     // Final check for all responses
     checkForResponses();
     
-    // Command 6: Set custom mode (56 81) - Run once during initialization
-    Serial.println("📤 Step 6: Set custom mode (56 81)");
-    memset(cmd, 0, 64);
-    cmd[0] = 0x56; cmd[1] = 0x81;
-    cmd[4] = 0x01; cmd[8] = 0x02;
-    cmd[12] = 0xbb; cmd[13] = 0xbb; cmd[14] = 0xbb; cmd[15] = 0xbb;
-    cmd[16] = 0xbb; cmd[17] = 0xbb; cmd[18] = 0xbb; cmd[19] = 0xbb;
-    
-    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    Serial.print("🔍 Custom mode result: 0x");
-    Serial.println(rcode, HEX);
-    if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Custom mode failed with error: 0x");
-        Serial.println(rcode, HEX);
-        return false;
-    }
-    Serial.println("✅ Custom mode set successfully");
-    delay(50);
-    
     Serial.println("✅ Initialization sequence complete");
     return true;
 }
@@ -220,7 +216,7 @@ void HIDSelector::ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t 
         
         for (uint8_t i = 0; i < len; i++) {
             if (buf[i] < 0x10) Serial.print("0");
-          Serial.print(buf[i], HEX);
+            Serial.print(buf[i], HEX);
             Serial.print(" ");
         }
         Serial.println();
@@ -245,9 +241,9 @@ void HIDSelector::ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t 
                         Serial.print(i + 9);
                         Serial.print(" ");
                     }
-        }
-        Serial.println();
-      }
+                }
+                Serial.println();
+            }
         }
     }
 }
@@ -332,132 +328,281 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
     Serial.println("📋 Note: Library may override toggle settings during transfer");
 }
 
-// Test LED command sequence with cycling RGB animation
+// Test LED command sequence based on the exact breakdown file
 void HIDSelector::testLEDCommands() {
-    static uint8_t colorPhase = 0; // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta
     uint8_t cmd[64];
     uint8_t rcode;
     
-    // Define color patterns for animation
-    uint8_t colors[6][3] = {
-        {0xFF, 0x00, 0x00}, // Red
-        {0x00, 0xFF, 0x00}, // Green  
-        {0x00, 0x00, 0xFF}, // Blue
-        {0xFF, 0xFF, 0x00}, // Yellow
-        {0x00, 0xFF, 0xFF}, // Cyan
-        {0xFF, 0x00, 0xFF}  // Magenta
+    // Helper function to check for command echo
+    auto checkForEcho = [&](uint8_t expectedCmd1, uint8_t expectedCmd2, const char* cmdName) -> bool {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            uint8_t response[64];
+            uint16_t responseLen = 64;
+            uint8_t pollResult = pUsb->inTransfer(bAddress, 0x3, &responseLen, response);
+            
+            if (pollResult == 0 && responseLen >= 2) {
+                if (response[0] == expectedCmd1 && response[1] == expectedCmd2) {
+                    Serial.print("✅ ECHO CONFIRMED: ");
+                    Serial.print(cmdName);
+                    Serial.print(" (");
+                    if (response[0] < 0x10) Serial.print("0");
+                    Serial.print(response[0], HEX);
+                    Serial.print(" ");
+                    if (response[1] < 0x10) Serial.print("0");
+                    Serial.print(response[1], HEX);
+                    Serial.println(") echoed back!");
+                    return true;
+                }
+            }
+            delay(3);
+        }
+        return false;
     };
     
-    uint8_t r = colors[colorPhase][0];
-    uint8_t g = colors[colorPhase][1];
-    uint8_t b = colors[colorPhase][2];
+    // Command 1: Set effect (56 81) - custom mode
+    Serial.println("🎨 Command 1: Set effect mode (custom bbbbbbbb)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x81;
+    cmd[4] = 0x01; cmd[8] = 0x02;
+    cmd[12] = 0xbb; cmd[13] = 0xbb; cmd[14] = 0xbb; cmd[15] = 0xbb;
+    cmd[16] = 0xbb; cmd[17] = 0xbb; cmd[18] = 0xbb; cmd[19] = 0xbb;
     
-    const char* colorNames[] = {"Red", "Green", "Blue", "Yellow", "Cyan", "Magenta"};
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 1 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x81, "Set Effect Mode");
+    delay(50);
     
-    Serial.print("🎨 Animating LEDs: ");
-    Serial.print(colorNames[colorPhase]);
-    Serial.print(" (RGB: ");
-    if (r < 0x10) Serial.print("0");
-    Serial.print(r, HEX);
-    Serial.print(", ");
-    if (g < 0x10) Serial.print("0");
-    Serial.print(g, HEX);
-    Serial.print(", ");
-    if (b < 0x10) Serial.print("0");
-    Serial.print(b, HEX);
-    Serial.println(")");
-     
-    // Command 1: Package 1 of 2 (56 83) - Exact breakdown structure
+    // Command 2: Package 1 of 2 (56 83)
+    Serial.println("🎨 Command 2: Package 1 of 2 (RGB data set 1)");
     memset(cmd, 0, 64);
     cmd[0] = 0x56; cmd[1] = 0x83;
     cmd[4] = 0x01; cmd[8] = 0x80; cmd[9] = 0x01;
     cmd[12] = 0xff; cmd[18] = 0xff; cmd[19] = 0xff;
     
-    // RGB data starting at position 24 with exact LED ordering from breakdown
+    // RGB data starting at position 24
     int pos = 24;
+    // LED buttons with exact breakdown colors
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 1
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 6
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 11
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 16
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 21
     
-    // Row 1: Buttons 1, 6, 11, 16, 21
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 1
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 6
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 11
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 16
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 21
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 2
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 7
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 12
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 17
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 22
     
-    // Row 2: Buttons 2, 7, 12, 17, 22
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 2
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 7
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 12
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 17
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 22
-    
-    // Row 3: Buttons 3, 8, 13, and PARTIAL Button 18 (R component only)
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 3
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 8
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 13
-    cmd[pos++] = r; // Button 18 (R component only - packet boundary!)
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 3
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 8
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 13
+    cmd[pos++] = 0x97; // Button 18 (R component only)
     
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 2 failed: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
+    Serial.print("🔍 Command 2 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x83, "Package 1");
+    delay(50);
     
-    // NO DELAY - Send Package 2 immediately to prevent black LEDs
-    delay(1);
-    // Command 2: Package 2 of 2 (56 83 01) - Exact breakdown structure
+    // Command 3: Package 2 of 2 (56 83 01)
+    Serial.println("🎨 Command 3: Package 2 of 2 (RGB data set 2)");
     memset(cmd, 0, 64);
     cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
     
     pos = 3;
-    // Complete Button 18 (GB components) and Button 23
-    cmd[pos++] = 0x00; cmd[pos++] = g; cmd[pos++] = b; // Button 18 (GB components)
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 23
+    cmd[pos++] = 0x00; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 18 (GB)
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 23
     
-    // Row 4: Buttons 4, 9, 14, 19, 24
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 4
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 9
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 14
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 19
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 24
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 4
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 9
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 14
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 19
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 24
     
-    // Row 5: Buttons 5, 10, 15, 20
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 5
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 10
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 15
-    cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 20
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 5
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 10
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 15
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 20
     
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 3 failed: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    // NO DELAY - Send status immediately
+    Serial.print("🔍 Command 3 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x83, "Package 2");
+    delay(50);
     
     // Command 4: Status (41 80)
-    // memset(cmd, 0, 64);
-    // cmd[0] = 0x41; cmd[1] = 0x80;
-    // rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.println("🎨 Command 4: Status check (41 80)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x41; cmd[1] = 0x80;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 4 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x41, 0x80, "Status Check");
+    delay(50);
     
-    // NO DELAY - Send final activation immediately
-    delay(2);
-    // Command 3: Final activation (51 28)
+    // Command 5: Final activation (51 28)
+    Serial.println("🎨 Command 5: Final activation (51 28)");
     memset(cmd, 0, 64);
     cmd[0] = 0x51; cmd[1] = 0x28;
     cmd[4] = 0xff;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 5 failed: 0x");
-        Serial.println(rcode, HEX);
-        return;
+    Serial.print("🔍 Command 5 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x51, 0x28, "Final Activation");
+    
+    Serial.println("🎉 LED command sequence complete!");
+    Serial.println("💡 LEDs should now display the exact pattern from breakdown file!");
+}
+
+// Rainbow animation with moving highlight
+void HIDSelector::animateRainbowWithHighlight() {
+    uint8_t cmd[64];
+    uint8_t rcode;
+    static int highlightButton = 1;
+    static unsigned long lastUpdate = 0;
+    
+    // Only update every 200ms
+    if (millis() - lastUpdate < 200) return;
+    lastUpdate = millis();
+    
+    Serial.print("🌈 Rainbow animation - highlighting button ");
+    Serial.println(highlightButton);
+    
+    // Helper function to convert HSV to RGB for rainbow effect
+    auto hsvToRgb = [](float h, float s, float v, uint8_t* r, uint8_t* g, uint8_t* b) {
+        float c = v * s;
+        float x = c * (1 - abs(fmod(h / 60.0, 2) - 1));
+        float m = v - c;
+        
+        float rp, gp, bp;
+        if (h >= 0 && h < 60) { rp = c; gp = x; bp = 0; }
+        else if (h >= 60 && h < 120) { rp = x; gp = c; bp = 0; }
+        else if (h >= 120 && h < 180) { rp = 0; gp = c; bp = x; }
+        else if (h >= 180 && h < 240) { rp = 0; gp = x; bp = c; }
+        else if (h >= 240 && h < 300) { rp = x; gp = 0; bp = c; }
+        else { rp = c; gp = 0; bp = x; }
+        
+        *r = (uint8_t)((rp + m) * 255);
+        *g = (uint8_t)((gp + m) * 255);
+        *b = (uint8_t)((bp + m) * 255);
+    };
+    
+    // Command 1: Set effect mode (custom)
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x81;
+    cmd[4] = 0x01; cmd[8] = 0x02;
+    cmd[12] = 0xbb; cmd[13] = 0xbb; cmd[14] = 0xbb; cmd[15] = 0xbb;
+    cmd[16] = 0xbb; cmd[17] = 0xbb; cmd[18] = 0xbb; cmd[19] = 0xbb;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    delay(10);
+    
+    // Command 2: Package 1 of 2 (RGB data set 1)
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x83;
+    cmd[4] = 0x01; cmd[8] = 0x80; cmd[9] = 0x01;
+    cmd[12] = 0xff; cmd[18] = 0xff; cmd[19] = 0xff;
+    
+    // Generate rainbow colors for buttons 1-14 + partial 18
+    int pos = 24;
+    for (int btn = 1; btn <= 14; btn++) {
+        uint8_t r, g, b;
+        
+        if (btn == highlightButton) {
+            // Bright white highlight for current button
+            r = 0xFF; g = 0xFF; b = 0xFF;
+        } else {
+            // Rainbow background based on button position
+            float hue = ((btn - 1) * 360.0 / 24.0);
+            hsvToRgb(hue, 1.0, 0.3, &r, &g, &b); // Dimmer rainbow background
+        }
+        
+        cmd[pos++] = r;
+        cmd[pos++] = g;
+        cmd[pos++] = b;
     }
     
-    // Advance to next color for next animation cycle
-    colorPhase = (colorPhase + 1) % 6;
+    // Button 18 red component
+    uint8_t r18, g18, b18;
+    if (highlightButton == 18) {
+        r18 = 0xFF;
+    } else {
+        float hue = ((18 - 1) * 360.0 / 24.0);
+        hsvToRgb(hue, 1.0, 0.3, &r18, &g18, &b18);
+    }
+    cmd[pos++] = r18;
     
-    Serial.println("✅ Animation frame sent successfully!");
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    delay(10);
+    
+    // Command 3: Package 2 of 2 (RGB data set 2)
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
+    
+    pos = 3;
+    // Complete button 18 (GB components)
+    if (highlightButton == 18) {
+        cmd[pos++] = 0x00; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; // Complete white
+    } else {
+        cmd[pos++] = 0x00; cmd[pos++] = g18; cmd[pos++] = b18;
+    }
+    
+    // Buttons 19-24
+    for (int btn = 19; btn <= 24; btn++) {
+        uint8_t r, g, b;
+        
+        if (btn == highlightButton) {
+            // Bright white highlight
+            r = 0xFF; g = 0xFF; b = 0xFF;
+        } else {
+            // Rainbow background
+            float hue = ((btn - 1) * 360.0 / 24.0);
+            hsvToRgb(hue, 1.0, 0.3, &r, &g, &b);
+        }
+        
+        cmd[pos++] = r;
+        cmd[pos++] = g;
+        cmd[pos++] = b;
+    }
+    
+    // Buttons 15-17
+    for (int btn = 15; btn <= 17; btn++) {
+        uint8_t r, g, b;
+        
+        if (btn == highlightButton) {
+            r = 0xFF; g = 0xFF; b = 0xFF;
+        } else {
+            float hue = ((btn - 1) * 360.0 / 24.0);
+            hsvToRgb(hue, 1.0, 0.3, &r, &g, &b);
+        }
+        
+        cmd[pos++] = r;
+        cmd[pos++] = g;
+        cmd[pos++] = b;
+    }
+    
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    delay(10);
+    
+    // Command 4: Status check
+    memset(cmd, 0, 64);
+    cmd[0] = 0x41; cmd[1] = 0x80;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    delay(10);
+    
+    // Command 5: Final activation
+    memset(cmd, 0, 64);
+    cmd[0] = 0x51; cmd[1] = 0x28;
+    cmd[4] = 0xff;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    
+    // Move to next button
+    highlightButton++;
+    if (highlightButton > 24) {
+        highlightButton = 1;
+        Serial.println("🔄 Animation cycle complete - restarting from button 1");
+    }
 }
 
 USB Usb;
@@ -486,46 +631,30 @@ void loop()
 {
     Usb.Task();
     
-    // Initialize Interface 1 with proper timing after device is detected
+    // Initialize Interface 1 once device is ready and operational
     static bool interface1InitAttempted = false;
     static bool animationStarted = false;
-    static unsigned long deviceReadyTime = 0;
     
-    // Mark when device first becomes ready
-    if (hidSelector.isReady() && deviceReadyTime == 0) {
-        deviceReadyTime = millis();
-        Serial.println("🔍 Device detected! Waiting for full initialization...");
-    }
-    
-    // Wait 2 seconds after device is ready before attempting Interface 1 init
-    if (hidSelector.isReady() && !interface1InitAttempted && deviceReadyTime > 0 && 
-        (millis() - deviceReadyTime > 2000)) {
+    if (hidSelector.isReady() && !interface1InitAttempted) {
         interface1InitAttempted = true;
-        Serial.println("🚀 Device fully ready! Initializing Interface 1 for LED control...");
-        bool success = hidSelector.initializeInterface1();
-        if (success) {
+        Serial.println("🚀 Device ready! Initializing Interface 1 for LED control...");
+        bool initSuccess = hidSelector.initializeInterface1();
+        
+        if (initSuccess) {
             animationStarted = true;
-            Serial.println("🌈 Starting continuous RGB animation test...");
-            Serial.println("💡 Animation will cycle through: Red → Green → Blue → Yellow → Cyan → Magenta");
-            Serial.println("⏱️ Each color will display for 500ms to allow complete LED processing");
-        } else {
-            Serial.println("❌ Interface 1 initialization failed - will retry in 5 seconds");
-            // Reset for retry
-            interface1InitAttempted = false;
-            deviceReadyTime = millis(); // Reset timer for retry
+            Serial.println("🌈 Starting rainbow animation with moving highlight!");
+            Serial.println("💡 Animation: Button 1-24 highlight moving every 200ms with rainbow background");
         }
     }
     
-    // Run RGB animation every 500ms to allow complete processing
-    static unsigned long lastAnimation = 0;
-    if (animationStarted && millis() - lastAnimation > 500) {
-        lastAnimation = millis();
-        hidSelector.testLEDCommands();
+    // Run rainbow animation continuously after initialization
+    if (animationStarted && hidSelector.isReady()) {
+        hidSelector.animateRainbowWithHighlight();
     }
     
-    // Poll Interface 1 endpoint 0x83 for additional data (reduced frequency to avoid interference)
+    // Poll Interface 1 endpoint 0x83 for additional data (reduced frequency during animation)
     static unsigned long lastPoll = 0;
-    if (millis() - lastPoll > 300 && hidSelector.isReady()) { // Poll every 300ms (further reduced)
+    if (millis() - lastPoll > 200 && hidSelector.isReady()) { // Poll every 200ms to not interfere with animation
         lastPoll = millis();
         
         uint8_t buf[64];
@@ -533,27 +662,16 @@ void loop()
         uint8_t rcode = Usb.inTransfer(hidSelector.GetAddress(), 0x83, &len, buf);
         
         if (rcode == 0 && len > 0) {
-            // Only show non-empty responses to avoid spam
-            bool hasData = false;
-            for (uint8_t i = 0; i < len; i++) {
-                if (buf[i] != 0) {
-                    hasData = true;
-                    break;
-                }
+            Serial.print("📡 Interface 1 EP 0x83 (");
+            Serial.print(len);
+            Serial.print(" bytes): ");
+            for (uint8_t i = 0; i < len && i < 16; i++) {
+                if (buf[i] < 0x10) Serial.print("0");
+                Serial.print(buf[i], HEX);
+                Serial.print(" ");
             }
-            
-            if (hasData) {
-                Serial.print("📡 Interface 1 EP 0x83 (");
-                Serial.print(len);
-                Serial.print(" bytes): ");
-                for (uint8_t i = 0; i < len && i < 16; i++) {
-                    if (buf[i] < 0x10) Serial.print("0");
-                    Serial.print(buf[i], HEX);
-                    Serial.print(" ");
-                }
-                if (len > 16) Serial.print("...");
-                Serial.println();
-            }
+            if (len > 16) Serial.print("...");
+            Serial.println();
         }
     }
 }
