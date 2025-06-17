@@ -17,8 +17,13 @@ public:
     HIDSelector(USB *p) : HIDComposite(p) {};
     
     // Add method to initialize Interface 1
-    void initializeInterface1();
+    bool initializeInterface1();
     bool sendInitializationSequence();
+    bool checkAndSyncToggles(const char* stepName);
+    void showToggleStates(const char* afterCommand);
+    void resetToggleAfterNAK(const char* commandName);
+    void setToggleForNextTransfer(uint8_t toggleState, const char* reason);
+    void testLEDCommands();
 
 protected:
     void ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t len, uint8_t *buf); // Called by the HIDComposite library
@@ -37,123 +42,146 @@ bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
     // Select Interface 0 (standard HID) and Interface 1 (control interface)
     if (iface == 0 || iface == 1) {
         return true;
-    }
-    
+  }
+
     return false;
 }
 
 // Called when device is successfully initialized
 uint8_t HIDSelector::OnInitSuccessful() {
     Serial.println("✅ HID device initialized successfully");
-    
-    // Call parent initialization first
-    uint8_t rcode = HIDComposite::OnInitSuccessful();
-    
-    // Now initialize Interface 1 for LED control
-    if (!interface1Initialized) {
-        Serial.println("🚀 Initializing Interface 1 for LED control...");
-        initializeInterface1();
-    }
-    
-    return rcode;
+    Serial.println("⏳ Waiting for device to be fully ready for Interface 1...");
+    return 0;
 }
 
 // Initialize Interface 1 with the CM Control Pad commands
-void HIDSelector::initializeInterface1() {
+bool HIDSelector::initializeInterface1() {
     Serial.println("📤 Sending CM Control Pad initialization sequence...");
     
-    if (sendInitializationSequence()) {
-        interface1Initialized = true;
+    if (!isReady()) {
+        Serial.println("❌ Device not ready for initialization");
+        return false;
+    }
+    
+    // Send initialization sequence
+    bool success = sendInitializationSequence();
+    
+    if (success) {
         Serial.println("✅ Interface 1 initialized successfully!");
+        Serial.println("🌈 Testing LED command sequence...");
+        testLEDCommands();
     } else {
         Serial.println("❌ Interface 1 initialization failed");
     }
+    
+    return success;
 }
+
+// Track command responses for cleaner output
+struct CommandResponse {
+    uint8_t cmd1, cmd2;
+    bool found;
+    const char* name;
+};
 
 // Send the initialization command sequence
 bool HIDSelector::sendInitializationSequence() {
-    uint8_t cmd[64] = {0};
+    uint8_t cmd[64];
     uint8_t rcode;
+    
+    // Track command confirmations
+    bool confirmed[5] = {false, false, false, false, false};
+    const char* cmdNames[] = {"Setup 1", "Setup 2", "Setup 3", "Status", "Effects"};
+    uint8_t cmdCodes[][2] = {{0x42, 0x00}, {0x42, 0x10}, {0x43, 0x00}, {0x41, 0x80}, {0x52, 0x00}};
+    
+    // Helper function to check for responses
+    auto checkForResponses = [&]() {
+        for (int attempt = 0; attempt < 15; attempt++) {
+            uint8_t response[64];
+            uint16_t responseLen = 64;
+            uint8_t pollResult = pUsb->inTransfer(bAddress, 0x3, &responseLen, response);
+            
+            if (pollResult == 0 && responseLen >= 2) {
+                for (int i = 0; i < 5; i++) {
+                    if (response[0] == cmdCodes[i][0] && response[1] == cmdCodes[i][1] && !confirmed[i]) {
+                        confirmed[i] = true;
+                        Serial.print("✅ ");
+                        Serial.print(cmdNames[i]);
+                        Serial.print(" (");
+                        if (response[0] < 0x10) Serial.print("0");
+                        Serial.print(response[0], HEX);
+                        Serial.print(" ");
+                        if (response[1] < 0x10) Serial.print("0");
+                        Serial.print(response[1], HEX);
+                        Serial.println("): CONFIRMED");
+                        break;
+                    }
+                }
+            }
+            delay(2);
+        }
+    };
+    
+    if (!isReady()) {
+        Serial.println("❌ Device not ready for command sequence");
+        return false;
+    }
     
     // Command 1: 42 00
     Serial.println("📤 Step 1: Setup command 42 00");
     memset(cmd, 0, 64);
-    cmd[0] = 0x42; cmd[1] = 0x00;
-    cmd[4] = 0x01; cmd[7] = 0x01;
+    cmd[0] = 0x42; cmd[1] = 0x00; cmd[4] = 0x01; cmd[7] = 0x01;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode) {
-        Serial.print("⚠️ Command 1 NAK/error: 0x");
-        Serial.println(rcode, HEX);
-        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
-    }
-    delay(10);
+    if (rcode && rcode != 0x4) return false;
+    Serial.println("✅ Command 1 sent successfully");
+    delay(100);
     
     // Command 2: 42 10
     Serial.println("📤 Step 2: Setup command 42 10");
     memset(cmd, 0, 64);
-    cmd[0] = 0x42; cmd[1] = 0x10;
-    cmd[4] = 0x01; cmd[7] = 0x01;
+    cmd[0] = 0x42; cmd[1] = 0x10; cmd[4] = 0x01; cmd[7] = 0x01;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode) {
-        Serial.print("⚠️ Command 2 NAK/error: 0x");
-        Serial.println(rcode, HEX);
-        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
-    }
-    delay(10);
+    if (rcode && rcode != 0x4) return false;
+    Serial.println("✅ Command 2 sent successfully");
+    delay(200);
     
     // Command 3: 43 00
     Serial.println("📤 Step 3: Setup command 43 00");
     memset(cmd, 0, 64);
-    cmd[0] = 0x43; cmd[1] = 0x00;
-    cmd[4] = 0x01;
+    cmd[0] = 0x43; cmd[1] = 0x00; cmd[4] = 0x01;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode) {
-        Serial.print("⚠️ Command 3 NAK/error: 0x");
-        Serial.println(rcode, HEX);
-        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
-    }
-    delay(15);
+    if (rcode && rcode != 0x4) return false;
+    Serial.println("✅ Command 3 sent successfully");
+    delay(130);
     
-    // Command 4: 41 80 (status) - retry if fails (as shown in USB capture)
+    // Check for setup responses
+    checkForResponses();
+    
+    // Command 4: 41 80 (status)
     Serial.println("📤 Step 4: Status command 41 80");
     memset(cmd, 0, 64);
     cmd[0] = 0x41; cmd[1] = 0x80;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode) {
-        Serial.print("⚠️ Status command NAK, retrying: 0x");
-        Serial.println(rcode, HEX);
-        delay(5);
-        // Retry as shown in USB capture
-        Serial.println("📤 Step 4 retry: Status command 41 80");
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode) {
-            Serial.print("⚠️ Status command retry NAK: 0x");
-            Serial.println(rcode, HEX);
-        }
-    }
-    delay(10);
+    delay(20);
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode == 0) Serial.println("✅ Command 4 retry successful!");
+    delay(20);
     
-    // Command 5: 52 00 (activate effects) - retry if fails (as shown in USB capture)
+    // Command 5: 52 00 (activate effects)
     Serial.println("📤 Step 5: Activate effects 52 00");
     memset(cmd, 0, 64);
     cmd[0] = 0x52; cmd[1] = 0x00;
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    if (rcode) {
-        Serial.print("⚠️ Effects command NAK, retrying: 0x");
-        Serial.println(rcode, HEX);
-        delay(5);
-        // Retry as shown in USB capture
-        Serial.println("📤 Step 5 retry: Activate effects 52 00");
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode) {
-            Serial.print("⚠️ Effects command retry NAK: 0x");
-            Serial.println(rcode, HEX);
-        }
-    }
-    delay(10);
+    delay(20);
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode == 0) Serial.println("✅ Command 5 retry successful!");
+    delay(20);
     
-    Serial.println("✅ Initialization sequence complete (device responding with echoes!)");
-    return true; // Success - we saw command echoes which means device is responding
+    // Final check for all responses
+    checkForResponses();
+    
+    Serial.println("✅ Initialization sequence complete");
+    return true;
 }
 
 // Will be called for all HID data received from the USB interface
@@ -199,6 +227,214 @@ void HIDSelector::ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t 
     }
 }
 
+// Check and synchronize data toggles if needed (simplified)
+bool HIDSelector::checkAndSyncToggles(const char* stepName) {
+    // USB library handles toggles correctly - no intervention needed
+    return false;
+}
+
+// Reset OUT toggle after NAK (failed transfer should not advance toggle)
+void HIDSelector::resetToggleAfterNAK(const char* commandName) {
+    // Read current toggle state
+    uint8_t hrslReg = pUsb->regRd(rHRSL);
+    uint8_t currentToggle = (hrslReg & bmSNDTOGRD) ? 1 : 0;
+    
+    // Toggle should revert to previous state since transfer failed
+    uint8_t previousToggle = currentToggle ^ 1; // Flip bit (1->0, 0->1)
+    
+    Serial.print("🔄 NAK received for ");
+    Serial.print(commandName);
+    Serial.print(" - will retry with DATA");
+    Serial.println(previousToggle);
+    
+    // Set the toggle for the next retry transfer
+    // Read current HCTL register to preserve other bits
+    uint8_t hctlReg = pUsb->regRd(rHCTL);
+    
+    // Clear existing OUT toggle bits (bits 7,6 = SNDTOG1,SNDTOG0)
+    hctlReg &= 0x3F; // Keep lower 6 bits, clear upper 2 OUT toggle bits
+    
+    // Set OUT toggle to previous state for retry
+    if (previousToggle == 1) {
+        hctlReg |= (0x01 << 6); // SNDTOG0 = 1 (DATA1)
+        Serial.println("🔧 Setting retry toggle to DATA1");
+    } else {
+        Serial.println("🔧 Setting retry toggle to DATA0");
+    }
+    // For DATA0, both SNDTOG1 and SNDTOG0 = 0 (already cleared above)
+    
+    // Write the updated HCTL register - this sets toggle for NEXT transfer
+    pUsb->regWr(rHCTL, hctlReg);
+    
+    // Verify by reading back
+    delay(2);
+    hrslReg = pUsb->regRd(rHRSL);
+    uint8_t newToggle = (hrslReg & bmSNDTOGRD) ? 1 : 0;
+    Serial.print("📊 Toggle after reset attempt: DATA");
+    Serial.println(newToggle);
+}
+
+// Simple function to show current toggle states (simplified)
+void HIDSelector::showToggleStates(const char* afterCommand) {
+    // Toggle states are managed automatically by USB library
+    // No need for verbose debugging output
+}
+
+// Set toggle state for the next transfer by working with library's endpoint management
+void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reason) {
+    Serial.print("🔧 ");
+    Serial.print(reason);
+    Serial.print(" - attempting to set next transfer to DATA");
+    Serial.println(toggleState);
+    
+    // Try to access the endpoint info through the library's interface
+    // The USB Host Shield library tracks toggles in endpoint structures
+    
+    // First try: Direct register manipulation (what we tried before)
+    uint8_t hctlReg = pUsb->regRd(rHCTL);
+    hctlReg &= 0x3F; // Clear OUT toggle bits
+    if (toggleState == 1) {
+        hctlReg |= (0x01 << 6); // SNDTOG0 = 1
+    }
+    pUsb->regWr(rHCTL, hctlReg);
+    
+    // Second try: Force a specific endpoint state if possible
+    // The library might be overriding our register writes with its own endpoint tracking
+    
+    // Try to reset the library's internal endpoint state
+    // This is a bit of a hack, but we need to work with how the library manages endpoints
+    
+    Serial.println("📋 Note: Library may override toggle settings during transfer");
+}
+
+// Test LED command sequence based on the exact breakdown file
+void HIDSelector::testLEDCommands() {
+    uint8_t cmd[64];
+    uint8_t rcode;
+    
+    // Helper function to check for command echo
+    auto checkForEcho = [&](uint8_t expectedCmd1, uint8_t expectedCmd2, const char* cmdName) -> bool {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            uint8_t response[64];
+            uint16_t responseLen = 64;
+            uint8_t pollResult = pUsb->inTransfer(bAddress, 0x3, &responseLen, response);
+            
+            if (pollResult == 0 && responseLen >= 2) {
+                if (response[0] == expectedCmd1 && response[1] == expectedCmd2) {
+                    Serial.print("✅ ECHO CONFIRMED: ");
+                    Serial.print(cmdName);
+                    Serial.print(" (");
+                    if (response[0] < 0x10) Serial.print("0");
+                    Serial.print(response[0], HEX);
+                    Serial.print(" ");
+                    if (response[1] < 0x10) Serial.print("0");
+                    Serial.print(response[1], HEX);
+                    Serial.println(") echoed back!");
+                    return true;
+                }
+            }
+            delay(3);
+        }
+        return false;
+    };
+    
+    // Command 1: Set effect (56 81) - custom mode
+    Serial.println("🎨 Command 1: Set effect mode (custom bbbbbbbb)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x81;
+    cmd[4] = 0x01; cmd[8] = 0x02;
+    cmd[12] = 0xbb; cmd[13] = 0xbb; cmd[14] = 0xbb; cmd[15] = 0xbb;
+    cmd[16] = 0xbb; cmd[17] = 0xbb; cmd[18] = 0xbb; cmd[19] = 0xbb;
+    
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 1 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x81, "Set Effect Mode");
+    delay(50);
+    
+    // Command 2: Package 1 of 2 (56 83)
+    Serial.println("🎨 Command 2: Package 1 of 2 (RGB data set 1)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x83;
+    cmd[4] = 0x01; cmd[8] = 0x80; cmd[9] = 0x01;
+    cmd[12] = 0xff; cmd[18] = 0xff; cmd[19] = 0xff;
+    
+    // RGB data starting at position 24
+    int pos = 24;
+    // LED buttons with exact breakdown colors
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 1
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 6
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 11
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 16
+    cmd[pos++] = 0xfb; cmd[pos++] = 0xfc; cmd[pos++] = 0xfd; // Button 21
+    
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 2
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 7
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 12
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 17
+    cmd[pos++] = 0xc9; cmd[pos++] = 0xca; cmd[pos++] = 0xcb; // Button 22
+    
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 3
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 8
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 13
+    cmd[pos++] = 0x97; // Button 18 (R component only)
+    
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 2 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x83, "Package 1");
+    delay(50);
+    
+    // Command 3: Package 2 of 2 (56 83 01)
+    Serial.println("🎨 Command 3: Package 2 of 2 (RGB data set 2)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
+    
+    pos = 3;
+    cmd[pos++] = 0x00; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 18 (GB)
+    cmd[pos++] = 0x97; cmd[pos++] = 0x98; cmd[pos++] = 0x99; // Button 23
+    
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 4
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 9
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 14
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 19
+    cmd[pos++] = 0x65; cmd[pos++] = 0x66; cmd[pos++] = 0x67; // Button 24
+    
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 5
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 10
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 15
+    cmd[pos++] = 0x33; cmd[pos++] = 0x34; cmd[pos++] = 0x35; // Button 20
+    
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 3 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x56, 0x83, "Package 2");
+    delay(50);
+    
+    // Command 4: Status (41 80)
+    Serial.println("🎨 Command 4: Status check (41 80)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x41; cmd[1] = 0x80;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 4 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x41, 0x80, "Status Check");
+    delay(50);
+    
+    // Command 5: Final activation (51 28)
+    Serial.println("🎨 Command 5: Final activation (51 28)");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x51; cmd[1] = 0x28;
+    cmd[4] = 0xff;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("🔍 Command 5 result: 0x");
+    Serial.println(rcode, HEX);
+    checkForEcho(0x51, 0x28, "Final Activation");
+    
+    Serial.println("🎉 LED command sequence complete!");
+    Serial.println("💡 LEDs should now display the exact pattern from breakdown file!");
+}
+
 USB Usb;
 //USBHub Hub(&Usb);
 HIDSelector hidSelector(&Usb);
@@ -225,6 +461,14 @@ void loop()
 {
     Usb.Task();
     
+    // Initialize Interface 1 once device is ready and operational
+    static bool interface1InitAttempted = false;
+    if (hidSelector.isReady() && !interface1InitAttempted) {
+        interface1InitAttempted = true;
+        Serial.println("🚀 Device ready! Initializing Interface 1 for LED control...");
+        hidSelector.initializeInterface1();
+    }
+    
     // Poll Interface 1 endpoint 0x83 for additional data
     static unsigned long lastPoll = 0;
     if (millis() - lastPoll > 50 && hidSelector.isReady()) { // Poll every 50ms
@@ -246,5 +490,5 @@ void loop()
             if (len > 16) Serial.print("...");
             Serial.println();
         }
-    }
+  }
 }
