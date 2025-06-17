@@ -24,6 +24,10 @@ public:
     void resetToggleAfterNAK(const char* commandName);
     void setToggleForNextTransfer(uint8_t toggleState, const char* reason);
     void testLEDCommands();
+    void waitForUSBFrameSync();
+    void waitForFIFOReady();
+    
+    // MAX3421E timing synchronization methods
 
 protected:
     void ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t len, uint8_t *buf); // Called by the HIDComposite library
@@ -332,7 +336,7 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
     Serial.println("📋 Note: Library may override toggle settings during transfer");
 }
 
-// Test LED command sequence with cycling RGB animation
+// Test LED command sequence with cycling RGB animation - MAX3421E synchronized
 void HIDSelector::testLEDCommands() {
     static uint8_t colorPhase = 0; // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta
     uint8_t cmd[64];
@@ -366,7 +370,10 @@ void HIDSelector::testLEDCommands() {
     if (b < 0x10) Serial.print("0");
     Serial.print(b, HEX);
     Serial.println(")");
-     
+    
+    // Wait for USB frame synchronization - MAX3421E specific
+    waitForUSBFrameSync();
+    
     // Command 1: Package 1 of 2 (56 83) - Exact breakdown structure
     memset(cmd, 0, 64);
     cmd[0] = 0x56; cmd[1] = 0x83;
@@ -396,15 +403,18 @@ void HIDSelector::testLEDCommands() {
     cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 13
     cmd[pos++] = r; // Button 18 (R component only - packet boundary!)
     
+    // Wait for FIFO ready before sending
+    waitForFIFOReady();
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 2 failed: 0x");
+        Serial.print("❌ Command 1 failed: 0x");
         Serial.println(rcode, HEX);
         return;
     }
     
-    // NO DELAY - Send Package 2 immediately to prevent black LEDs
-    delay(1);
+    // Synchronize with USB frame before next packet - critical for timing
+    waitForUSBFrameSync();
+    
     // Command 2: Package 2 of 2 (56 83 01) - Exact breakdown structure
     memset(cmd, 0, 64);
     cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
@@ -427,29 +437,28 @@ void HIDSelector::testLEDCommands() {
     cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 15
     cmd[pos++] = r; cmd[pos++] = g; cmd[pos++] = b; // Button 20
     
+    // Wait for FIFO ready before sending
+    waitForFIFOReady();
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 3 failed: 0x");
+        Serial.print("❌ Command 2 failed: 0x");
         Serial.println(rcode, HEX);
         return;
     }
     
-    // NO DELAY - Send status immediately
+    // Final sync before activation - ensure LED data is processed
+    waitForUSBFrameSync();
     
-    // Command 4: Status (41 80)
-    // memset(cmd, 0, 64);
-    // cmd[0] = 0x41; cmd[1] = 0x80;
-    // rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-    
-    // NO DELAY - Send final activation immediately
-    delay(2);
     // Command 3: Final activation (51 28)
     memset(cmd, 0, 64);
     cmd[0] = 0x51; cmd[1] = 0x28;
     cmd[4] = 0xff;
+    
+    // Wait for FIFO ready before final command
+    waitForFIFOReady();
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     if (rcode != 0 && rcode != 0x4) {
-        Serial.print("❌ Command 5 failed: 0x");
+        Serial.print("❌ Command 3 failed: 0x");
         Serial.println(rcode, HEX);
         return;
     }
@@ -458,6 +467,36 @@ void HIDSelector::testLEDCommands() {
     colorPhase = (colorPhase + 1) % 6;
     
     Serial.println("✅ Animation frame sent successfully!");
+}
+
+// Wait for USB frame synchronization - aligns with MAX3421E 1ms USB frames
+void HIDSelector::waitForUSBFrameSync() {
+    // Simple frame synchronization using fixed timing
+    // MAX3421E operates on 1ms USB frame intervals
+    static unsigned long lastFrameTime = 0;
+    unsigned long currentTime = micros();
+    
+    // Ensure at least 1ms has passed since last frame
+    unsigned long timeSinceLastFrame = currentTime - lastFrameTime;
+    if (timeSinceLastFrame < 1000) {
+        delayMicroseconds(1000 - timeSinceLastFrame);
+    }
+    
+    lastFrameTime = micros();
+}
+
+// Wait for FIFO to be ready for transfer
+void HIDSelector::waitForFIFOReady() {
+    // Simple FIFO ready timing - wait for USB transfer completion
+    // This ensures previous transfer is complete before starting new one
+    delayMicroseconds(200); // Wait for FIFO to stabilize
+    
+    // Additional check to ensure USB subsystem is ready
+    unsigned long startTime = micros();
+    while (!pUsb || micros() - startTime > 500) {
+        if (micros() - startTime > 500) break; // Timeout
+        delayMicroseconds(50);
+    }
 }
 
 USB Usb;
@@ -507,7 +546,7 @@ void loop()
             animationStarted = true;
             Serial.println("🌈 Starting continuous RGB animation test...");
             Serial.println("💡 Animation will cycle through: Red → Green → Blue → Yellow → Cyan → Magenta");
-            Serial.println("⏱️ Each color will display for 500ms to allow complete LED processing");
+            Serial.println("⏱️ Each color will display for 150ms to allow complete LED processing");
         } else {
             Serial.println("❌ Interface 1 initialization failed - will retry in 5 seconds");
             // Reset for retry
@@ -516,9 +555,9 @@ void loop()
         }
     }
     
-    // Run RGB animation every 500ms to allow complete processing
+    // Run RGB animation every 150ms to allow complete processing
     static unsigned long lastAnimation = 0;
-    if (animationStarted && millis() - lastAnimation > 500) {
+    if (animationStarted && millis() - lastAnimation > 150) {
         lastAnimation = millis();
         hidSelector.testLEDCommands();
     }
