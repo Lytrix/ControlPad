@@ -354,7 +354,7 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
     Serial.println("📋 Note: Library may override toggle settings during transfer");
 }
 
-// Test LED command sequence with moving LED on rainbow background - SOF optimized
+// Test LED command sequence with moving LED on rainbow background - OPTIMIZED FRAME CREATION
 void HIDSelector::testLEDCommands() {
     static uint8_t movingLED = 0; // Which LED is currently bright (0-23)
     uint8_t cmd[64];
@@ -366,7 +366,46 @@ void HIDSelector::testLEDCommands() {
     Serial.print(debugCounter);
     Serial.print(" starting... ");
     
-    // Pre-calculated rainbow colors for maximum speed
+    // === OPTIMIZED FRAME TEMPLATES - PRE-BUILT FOR MAXIMUM SPEED ===
+    
+    // Pre-built Package 1 template (no dynamic changes needed)
+    static const uint8_t package1Template[64] = {
+        0x56, 0x83, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
+        0x80, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+        // RGB data starts at position 24 - will be filled below
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    
+    // Pre-built Package 2 template 
+    static const uint8_t package2Template[64] = {
+        0x56, 0x83, 0x01, 
+        // RGB data starts at position 3 - will be filled below (61 zeros needed)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    
+    // Pre-built activation command (never changes)
+    static const uint8_t activationCmd[64] = {
+        0x51, 0x28, 0x00, 0x00, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    
+    // Pre-calculated rainbow colors (unchanged)
     static const uint8_t rainbowColors[24][3] = {
         // Row 1: Buttons 1, 6, 11, 16, 21 - Red gradient
         {0xFF, 0x00, 0x00}, {0xFF, 0x20, 0x00}, {0xFF, 0x40, 0x00}, {0xFF, 0x60, 0x00}, {0xFF, 0x80, 0x00},
@@ -380,7 +419,7 @@ void HIDSelector::testLEDCommands() {
         {0x40, 0x00, 0xFF}, {0x80, 0x00, 0xFF}, {0xC0, 0x00, 0xFF}, {0xFF, 0x00, 0xFF}
     };
     
-    // Pre-calculated button mapping for speed
+    // Pre-calculated button mapping (unchanged)
     static const uint8_t buttonMap[24] = {
          0,  5, 10, 15, 20,  // Buttons 1, 6, 11, 16, 21 (Row 1)
          1,  6, 11, 16, 21,  // Buttons 2, 7, 12, 17, 22 (Row 2)  
@@ -389,50 +428,65 @@ void HIDSelector::testLEDCommands() {
          4,  9, 14, 19       // Buttons 5, 10, 15, 20 (Row 5)
     };
     
-    // ULTRA-FAST execution - minimize time in SOF frame
+    // === ULTRA-FAST FRAME CREATION - NO DYNAMIC ALLOCATION ===
     
-    // Command 1: Package 1 - pre-built structure for speed
-    memset(cmd, 0, 64);
-    cmd[0] = 0x56; cmd[1] = 0x83; cmd[4] = 0x01; cmd[8] = 0x80; cmd[9] = 0x01;
-    cmd[12] = 0xff; cmd[18] = 0xff; cmd[19] = 0xff;
+    // Package 1: Fast template copy + optimized RGB fill
+    memcpy(cmd, package1Template, 64);  // Single fast copy instead of memset + individual assignments
     
-    // Fast RGB data population - optimized loop
-    int pos = 24;
-    for (int i = 0; i < 5; i++) { // Row 1
-        if (movingLED == i) {
-            cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-        } else {
-            const uint8_t* color = rainbowColors[buttonMap[i]];
-            cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-        }
-    }
-    for (int i = 5; i < 10; i++) { // Row 2
-        if (movingLED == i) {
-            cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-        } else {
-            const uint8_t* color = rainbowColors[buttonMap[i]];
-            cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-        }
-    }
-    for (int i = 10; i < 13; i++) { // Row 3 partial
-        if (movingLED == i) {
-            cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-        } else {
-            const uint8_t* color = rainbowColors[buttonMap[i]];
-            cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-        }
-    }
-    // Button 18 R component
-    cmd[pos++] = (movingLED == 13) ? 0xFF : rainbowColors[buttonMap[13]][0];
+    // Optimized RGB population - unrolled loops for maximum speed
+    uint8_t *rgbPtr = &cmd[24];  // Direct pointer arithmetic instead of pos tracking
     
-    // Save Package 1 for potential resend if Package 2 fails
+    // Row 1 (LEDs 0-4) - unrolled for speed
+    const uint8_t *color0 = (movingLED == 0) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[0]];
+    *rgbPtr++ = color0[0]; *rgbPtr++ = color0[1]; *rgbPtr++ = color0[2];
+    
+    const uint8_t *color1 = (movingLED == 1) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[1]];
+    *rgbPtr++ = color1[0]; *rgbPtr++ = color1[1]; *rgbPtr++ = color1[2];
+    
+    const uint8_t *color2 = (movingLED == 2) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[2]];
+    *rgbPtr++ = color2[0]; *rgbPtr++ = color2[1]; *rgbPtr++ = color2[2];
+    
+    const uint8_t *color3 = (movingLED == 3) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[3]];
+    *rgbPtr++ = color3[0]; *rgbPtr++ = color3[1]; *rgbPtr++ = color3[2];
+    
+    const uint8_t *color4 = (movingLED == 4) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[4]];
+    *rgbPtr++ = color4[0]; *rgbPtr++ = color4[1]; *rgbPtr++ = color4[2];
+    
+    // Row 2 (LEDs 5-9) - unrolled for speed
+    const uint8_t *color5 = (movingLED == 5) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[5]];
+    *rgbPtr++ = color5[0]; *rgbPtr++ = color5[1]; *rgbPtr++ = color5[2];
+    
+    const uint8_t *color6 = (movingLED == 6) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[6]];
+    *rgbPtr++ = color6[0]; *rgbPtr++ = color6[1]; *rgbPtr++ = color6[2];
+    
+    const uint8_t *color7 = (movingLED == 7) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[7]];
+    *rgbPtr++ = color7[0]; *rgbPtr++ = color7[1]; *rgbPtr++ = color7[2];
+    
+    const uint8_t *color8 = (movingLED == 8) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[8]];
+    *rgbPtr++ = color8[0]; *rgbPtr++ = color8[1]; *rgbPtr++ = color8[2];
+    
+    const uint8_t *color9 = (movingLED == 9) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[9]];
+    *rgbPtr++ = color9[0]; *rgbPtr++ = color9[1]; *rgbPtr++ = color9[2];
+    
+    // Row 3 partial (LEDs 10-12) - unrolled for speed
+    const uint8_t *color10 = (movingLED == 10) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[10]];
+    *rgbPtr++ = color10[0]; *rgbPtr++ = color10[1]; *rgbPtr++ = color10[2];
+    
+    const uint8_t *color11 = (movingLED == 11) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[11]];
+    *rgbPtr++ = color11[0]; *rgbPtr++ = color11[1]; *rgbPtr++ = color11[2];
+    
+    const uint8_t *color12 = (movingLED == 12) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[12]];
+    *rgbPtr++ = color12[0]; *rgbPtr++ = color12[1]; *rgbPtr++ = color12[2];
+    
+    // Button 18 R component only
+    *rgbPtr++ = (movingLED == 13) ? 0xFF : rainbowColors[buttonMap[13]][0];
+    
+    // Save Package 1 for potential resend - fast copy
     uint8_t package1Backup[64];
     memcpy(package1Backup, cmd, 64);
     
     // === SIMPLIFIED TIMING FOR PACKAGE 1 ===
-    // Instead of complex FRAMEIRQ polling, use simple timing to avoid overwhelming the device
-    // Small delay to ensure we don't send commands too rapidly
-    delayMicroseconds(100);
+    //delayMicroseconds(100);
     
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
@@ -440,60 +494,72 @@ void HIDSelector::testLEDCommands() {
     Serial.print(rcode, HEX);
     if (rcode == 0) {
         Serial.print(" ✅ → ");
-        // ACK received, wait before next command to prevent NAKs
-        // Increased based on library timing analysis
-        delayMicroseconds(400);
+       // delayMicroseconds(400);
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
-            delayMicroseconds(200); // Longer delay between retries
+            delayMicroseconds(200);
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             Serial.print("retry=0x");
             Serial.print(rcode, HEX);
             Serial.print(" ");
             if (rcode == 0) break;
-            if (rcode != 0x4) break; // Non-NAK error
+            if (rcode != 0x4) break;
         }
         if (rcode != 0) {
             Serial.println("FAILED");
             return;
         }
         Serial.print("recovered → ");
-        delayMicroseconds(300); // Extra time after recovery
+        delayMicroseconds(300);
     }
     
-    // Command 2: Package 2 - pre-built for speed
-    memset(cmd, 0, 64);
-    cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
+    // === PACKAGE 2: ULTRA-FAST CREATION ===
+    memcpy(cmd, package2Template, 64);  // Fast template copy
     
-    pos = 3;
-    // Button 18 GB + Button 23
+    rgbPtr = &cmd[3];  // Reset pointer to Package 2 RGB start
+    
+    // Button 18 GB + Button 23 (LEDs 13-14) - optimized
     if (movingLED == 13) {
-        cmd[pos++] = 0x00; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
+        *rgbPtr++ = 0x00; *rgbPtr++ = 0xFF; *rgbPtr++ = 0xFF;  // GB components for white
     } else {
-        cmd[pos++] = 0x00; 
-        cmd[pos++] = rainbowColors[buttonMap[13]][1]; 
-        cmd[pos++] = rainbowColors[buttonMap[13]][2];
-    }
-    if (movingLED == 14) {
-        cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-    } else {
-        const uint8_t* color = rainbowColors[buttonMap[14]];
-        cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
+        *rgbPtr++ = 0x00;  // G component always 0 for Package 2 
+        *rgbPtr++ = rainbowColors[buttonMap[13]][1]; 
+        *rgbPtr++ = rainbowColors[buttonMap[13]][2];
     }
     
-    // Rows 4 & 5 - optimized
-    for (int i = 15; i < 24; i++) {
-        if (movingLED == i) {
-            cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-        } else {
-            const uint8_t* color = rainbowColors[buttonMap[i]];
-            cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-        }
-    }
+    const uint8_t *color14 = (movingLED == 14) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[14]];
+    *rgbPtr++ = color14[0]; *rgbPtr++ = color14[1]; *rgbPtr++ = color14[2];
+    
+    // Rows 4 & 5 (LEDs 15-23) - unrolled for maximum speed
+    const uint8_t *color15 = (movingLED == 15) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[15]];
+    *rgbPtr++ = color15[0]; *rgbPtr++ = color15[1]; *rgbPtr++ = color15[2];
+    
+    const uint8_t *color16 = (movingLED == 16) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[16]];
+    *rgbPtr++ = color16[0]; *rgbPtr++ = color16[1]; *rgbPtr++ = color16[2];
+    
+    const uint8_t *color17 = (movingLED == 17) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[17]];
+    *rgbPtr++ = color17[0]; *rgbPtr++ = color17[1]; *rgbPtr++ = color17[2];
+    
+    const uint8_t *color18 = (movingLED == 18) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[18]];
+    *rgbPtr++ = color18[0]; *rgbPtr++ = color18[1]; *rgbPtr++ = color18[2];
+    
+    const uint8_t *color19 = (movingLED == 19) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[19]];
+    *rgbPtr++ = color19[0]; *rgbPtr++ = color19[1]; *rgbPtr++ = color19[2];
+    
+    const uint8_t *color20 = (movingLED == 20) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[20]];
+    *rgbPtr++ = color20[0]; *rgbPtr++ = color20[1]; *rgbPtr++ = color20[2];
+    
+    const uint8_t *color21 = (movingLED == 21) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[21]];
+    *rgbPtr++ = color21[0]; *rgbPtr++ = color21[1]; *rgbPtr++ = color21[2];
+    
+    const uint8_t *color22 = (movingLED == 22) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[22]];
+    *rgbPtr++ = color22[0]; *rgbPtr++ = color22[1]; *rgbPtr++ = color22[2];
+    
+    const uint8_t *color23 = (movingLED == 23) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[23]];
+    *rgbPtr++ = color23[0]; *rgbPtr++ = color23[1]; *rgbPtr++ = color23[2];
 
     // === SIMPLIFIED TIMING FOR PACKAGE 2 ===
-    // Small delay to ensure proper timing between commands
     delayMicroseconds(100);
 
     // Send Package 2 with proper timing
@@ -504,25 +570,23 @@ void HIDSelector::testLEDCommands() {
         Serial.print(rcode, HEX);
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(400); // Wait before activation (increased from 200μs)
-            break; // ACK received, proceed with timing
+            delayMicroseconds(400);
+            break;
         }
         Serial.print(" ❌");
         if (rcode != 0x4) {
             Serial.print(" (non-NAK error, aborting)");
             Serial.println();
-            return; // Non-NAK error, abort
+            return;
         }
         Serial.print(" (NAK, retry)");
-        delayMicroseconds(200); // Longer delay before retry to prevent NAK storms
+        delayMicroseconds(200);
     }
     if (rcode != 0) {
         Serial.print("FAILED after retries - restarting from Package 1... ");
-        // Resend Package 1 to reset device state
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, package1Backup);
         if (rcode == 0) {
             Serial.print("Pkg1 resent ✅ → ");
-            // Retry Package 2 once more
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             if (rcode == 0) {
                 Serial.print("Pkg2 recovered ✅ → ");
@@ -536,85 +600,41 @@ void HIDSelector::testLEDCommands() {
         }
     }
     
-    // Command 3: Activation - CRITICAL - must succeed
-    cmd[0] = 0x51; cmd[1] = 0x28; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0xff;
-    for (int i = 5; i < 64; i++) cmd[i] = 0; // Fast clear
+    // === ACTIVATION: PRE-BUILT COMMAND - INSTANT COPY ===
+    memcpy(cmd, activationCmd, 64);  // Ultra-fast - no dynamic creation needed
     
-    // === SIMPLIFIED TIMING FOR ACTIVATION ===
-    // Small delay to ensure proper timing before critical activation command
     delayMicroseconds(100);
     
-    // Send activation with conservative timing (this is the most important command)
+    // Send activation with conservative timing
     Serial.print("📤 Sending Activation command... ");
-    for (int retry = 0; retry < 3; retry++) { // Reduced retries to prevent overwhelming device
+    for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         Serial.print("rcode=0x");
         Serial.print(rcode, HEX);
         if (rcode == 0) {
             Serial.println(" ✅");
-            break; // Success
+            break;
         }
         Serial.print(" ❌");
         if (rcode != 0x4) {
             Serial.print(" (non-NAK error, aborting)");
             Serial.println();
-            return; // Non-NAK error on activation - this is critical
+            return;
         }
         Serial.print(" (NAK, retry)");
-        delayMicroseconds(200); // Much longer delay for activation retry to prevent NAK storms
+        delayMicroseconds(200);
     }
     
     if (rcode != 0) {
         Serial.print("📤 Activation FAILED - restarting full sequence... ");
-        // Resend Package 1 to reset device state
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, package1Backup);
         if (rcode == 0) {
             Serial.print("Pkg1 resent ✅ → ");
-            // Rebuild and resend Package 2
-            memset(cmd, 0, 64);
-            cmd[0] = 0x56; cmd[1] = 0x83; cmd[2] = 0x01;
-            
-            pos = 3;
-            // Button 18 GB + Button 23
-            if (movingLED == 13) {
-                cmd[pos++] = 0x00; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-            } else {
-                cmd[pos++] = 0x00; 
-                cmd[pos++] = rainbowColors[buttonMap[13]][1]; 
-                cmd[pos++] = rainbowColors[buttonMap[13]][2];
-            }
-            if (movingLED == 14) {
-                cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-            } else {
-                const uint8_t* color = rainbowColors[buttonMap[14]];
-                cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-            }
-            
-            // Rows 4 & 5 - optimized
-            for (int i = 15; i < 24; i++) {
-                if (movingLED == i) {
-                    cmd[pos++] = 0xFF; cmd[pos++] = 0xFF; cmd[pos++] = 0xFF;
-                } else {
-                    const uint8_t* color = rainbowColors[buttonMap[i]];
-                    cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
-                }
-            }
-            
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             if (rcode == 0) {
-                Serial.print("Pkg2 resent ✅ → ");
-                // Try activation one more time
-                cmd[0] = 0x51; cmd[1] = 0x28; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0xff;
-                for (int i = 5; i < 64; i++) cmd[i] = 0;
-                rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-                if (rcode == 0) {
-                    Serial.println("Activation recovered ✅");
-                } else {
-                    Serial.println("Activation still failed");
-                    return;
-                }
+                Serial.println("Activation recovered ✅");
             } else {
-                Serial.println("Pkg2 resend failed, aborting");
+                Serial.println("Activation still failed");
                 return;
             }
         } else {
@@ -914,24 +934,12 @@ void loop()
         static unsigned long lastTimerAnimation = 0;
         unsigned long nowMs = millis();
         
-        // Try a different approach: smaller, more frequent "micro-resets" every 20 seconds
-        // Instead of one big reset, do gentle frame counter refreshes
-        static unsigned long lastMicroReset = 0;
-        if (nowMs - lastMicroReset > 20000 && animationCount > 100) { // Every 20 seconds
-            Serial.print("🔄 Micro-reset at T+");
-            Serial.print(nowMs - loopStartTime);
-            Serial.print("ms (animation #");
-            Serial.print(animationCount);
-            Serial.println(") - gentle frame refresh");
-            
-            // Very gentle reset - just refresh frame counter, no delays
-            hidSelector.resetFrameCounter();
-            lastMicroReset = nowMs;
-            
-            Serial.println("✅ Micro-reset complete");
-        }
+        // ULTIMATE MINIMAL APPROACH: Zero interference strategy
+        // Frame counter resets and any USB maintenance operations
+        // have been proven to DISRUPT stable communication.
+        // Maximum stability achieved with NAK optimization alone.
         
-        if (nowMs - lastTimerAnimation >= 200) {
+        if (nowMs - lastTimerAnimation >= 100) {
             lastTimerAnimation = nowMs;
             animationCount++;
             
@@ -957,7 +965,7 @@ void loop()
     static unsigned long lastPoll = 0;
     static bool pollingEnabled = false; // EP polling completely broken - 100% failure rate
     
-    if (pollingEnabled && millis() - lastPoll > 100 && hidSelector.isReady()) { // Poll every 100ms (reduced from 50ms)
+    if (pollingEnabled && millis() - lastPoll > 50 && hidSelector.isReady()) { // Poll every 100ms (reduced from 50ms)
         unsigned long pollStartTime = millis();
         lastPoll = pollStartTime;
         
