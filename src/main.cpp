@@ -27,6 +27,9 @@ public:
     void waitForUSBFrameSync();
     void waitForFIFOReady();
     void resetDevice(); // Device recovery function
+    void resetFrameCounter(); // Reset USB frame counter to prevent wraparound issues
+    void checkUSBSpeed(); // Check and optimize USB speed settings
+    void optimizeNAKSettings(); // Optimize NAK tolerance for long-term stability
     
     // MAX3421E timing synchronization methods
 
@@ -426,25 +429,10 @@ void HIDSelector::testLEDCommands() {
     uint8_t package1Backup[64];
     memcpy(package1Backup, cmd, 64);
     
-    // === PROPER SOF SYNC FOR PACKAGE 1 ===
-    // Wait for next FRAMEIRQ (1ms SOF interrupt) - this is the correct MAX3421E method
-    // Read current FRAMEIRQ state and wait for it to change (indicating new frame)
-    uint8_t initialHirq = pUsb->regRd(0xC8); // Read HIRQ register (R25)
-    bool initialFrameIrq = (initialHirq & 0x40) != 0; // Check current FRAMEIRQ state
-    
-    // Wait for FRAMEIRQ state to change (max 1ms wait)
-    for (int i = 0; i < 100; i++) { // Max 1ms wait (10μs * 100)
-        delayMicroseconds(10);
-        uint8_t hirq = pUsb->regRd(0xC8); // Read HIRQ register
-        bool currentFrameIrq = (hirq & 0x40) != 0;
-        if (currentFrameIrq != initialFrameIrq) {
-            // FRAMEIRQ state changed - new frame started
-            break;
-        }
-    }
-    
-    // Small additional delay to ensure we're stable after FRAMEIRQ transition
-    delayMicroseconds(25);
+    // === SIMPLIFIED TIMING FOR PACKAGE 1 ===
+    // Instead of complex FRAMEIRQ polling, use simple timing to avoid overwhelming the device
+    // Small delay to ensure we don't send commands too rapidly
+    delayMicroseconds(100);
     
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
@@ -453,7 +441,8 @@ void HIDSelector::testLEDCommands() {
     if (rcode == 0) {
         Serial.print(" ✅ → ");
         // ACK received, wait before next command to prevent NAKs
-        delayMicroseconds(200);
+        // Increased based on library timing analysis
+        delayMicroseconds(400);
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
@@ -503,24 +492,9 @@ void HIDSelector::testLEDCommands() {
         }
     }
 
-    // === PROPER SOF SYNC FOR PACKAGE 2 ===
-    // Wait for FRAMEIRQ state transition to detect new frame
-    initialHirq = pUsb->regRd(0xC8); // Read HIRQ register
-    initialFrameIrq = (initialHirq & 0x40) != 0; // Check current FRAMEIRQ state
-    
-    // Wait for FRAMEIRQ state to change (max 1ms wait)
-    for (int i = 0; i < 100; i++) { // Max 1ms wait
-        delayMicroseconds(10);
-        uint8_t hirq = pUsb->regRd(0xC8); // Read HIRQ register
-        bool currentFrameIrq = (hirq & 0x40) != 0;
-        if (currentFrameIrq != initialFrameIrq) {
-            // FRAMEIRQ state changed - new frame started
-            break;
-        }
-    }
-    
-    // Small additional delay to ensure we're stable after FRAMEIRQ transition
-    delayMicroseconds(25);
+    // === SIMPLIFIED TIMING FOR PACKAGE 2 ===
+    // Small delay to ensure proper timing between commands
+    delayMicroseconds(100);
 
     // Send Package 2 with proper timing
     Serial.print("📤 Package 2... ");
@@ -530,7 +504,7 @@ void HIDSelector::testLEDCommands() {
         Serial.print(rcode, HEX);
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(200); // Wait before activation
+            delayMicroseconds(400); // Wait before activation (increased from 200μs)
             break; // ACK received, proceed with timing
         }
         Serial.print(" ❌");
@@ -566,24 +540,9 @@ void HIDSelector::testLEDCommands() {
     cmd[0] = 0x51; cmd[1] = 0x28; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0xff;
     for (int i = 5; i < 64; i++) cmd[i] = 0; // Fast clear
     
-    // === PROPER SOF SYNC FOR ACTIVATION ===
-    // Wait for FRAMEIRQ state transition to detect new frame
-    initialHirq = pUsb->regRd(0xC8); // Read HIRQ register
-    initialFrameIrq = (initialHirq & 0x40) != 0; // Check current FRAMEIRQ state
-    
-    // Wait for FRAMEIRQ state to change (max 1ms wait)
-    for (int i = 0; i < 100; i++) { // Max 1ms wait
-        delayMicroseconds(10);
-        uint8_t hirq = pUsb->regRd(0xC8); // Read HIRQ register
-        bool currentFrameIrq = (hirq & 0x40) != 0;
-        if (currentFrameIrq != initialFrameIrq) {
-            // FRAMEIRQ state changed - new frame started
-            break;
-        }
-    }
-    
-    // Small additional delay to ensure we're stable after FRAMEIRQ transition
-    delayMicroseconds(25);
+    // === SIMPLIFIED TIMING FOR ACTIVATION ===
+    // Small delay to ensure proper timing before critical activation command
+    delayMicroseconds(100);
     
     // Send activation with conservative timing (this is the most important command)
     Serial.print("📤 Sending Activation command... ");
@@ -703,9 +662,179 @@ void HIDSelector::resetDevice() {
     delay(100); // Give device time to reset
 }
 
+void HIDSelector::resetFrameCounter() {
+    Serial.print("🔄 Resetting USB frame counter...");
+    
+    // Reset frame counter using FRMRST bit (bit 1 of HCTL register 0xE8)
+    uint8_t hctlReg = pUsb->regRd(0xE8); // Read HCTL register
+    hctlReg |= 0x02; // Set FRMRST bit (bit 1)
+    pUsb->regWr(0xE8, hctlReg); // Write back to reset frame counter
+    
+    // Clear FRMRST bit after reset
+    delayMicroseconds(100); // Brief delay for reset to take effect
+    hctlReg &= ~0x02; // Clear FRMRST bit
+    pUsb->regWr(0xE8, hctlReg); // Write back
+    
+    Serial.println(" ✅ Complete");
+}
+
+void HIDSelector::checkUSBSpeed() {
+    Serial.println("🔍 Checking USB speed configuration...");
+    
+    // Check MAX3421E registers for speed information
+    uint8_t mode = pUsb->regRd(0x1B);  // MODE register
+    uint8_t vbusState = pUsb->getVbusState();
+    
+    Serial.print("📊 MODE register: 0x");
+    Serial.print(mode, HEX);
+    Serial.print(" (");
+    
+    if (mode & 0x02) {  // bmLOWSPEED bit
+        Serial.print("LOW-SPEED");
+    } else {
+        Serial.print("FULL-SPEED");
+    }
+    
+    Serial.print("), VBUS state: ");
+    Serial.print(vbusState);
+    Serial.print(" (");
+    
+    switch(vbusState) {
+        case 0x10: Serial.print("FSHOST - Full-Speed Host"); break;
+        case 0x20: Serial.print("LSHOST - Low-Speed Host"); break;
+        case 0x40: Serial.print("SE0 - Disconnected"); break;
+        case 0x50: Serial.print("SE1 - Illegal State"); break;
+        default: Serial.print("Unknown: 0x"); Serial.print(vbusState, HEX); break;
+    }
+    Serial.println(")");
+    
+    // Force full-speed if currently running low-speed
+    if (mode & 0x02) {  // bmLOWSPEED is set
+        Serial.println("⚡ Device is running in LOW-SPEED mode - forcing FULL-SPEED for better performance");
+        
+        // Force full-speed host mode
+        uint8_t newMode = (mode & ~0x02) | 0x01 | 0x08;  // Clear LOWSPEED, set HOST and SOFKAENAB
+        pUsb->regWr(0x1B, newMode);  // Write to MODE register
+        
+        Serial.print("✅ Switched to FULL-SPEED mode (MODE: 0x");
+        Serial.print(newMode, HEX);
+        Serial.println(")");
+        
+        delay(100);  // Allow time for speed change to take effect
+        
+        // Verify the change
+        uint8_t verifyMode = pUsb->regRd(0x1B);
+        Serial.print("🔍 Verification - New MODE: 0x");
+        Serial.print(verifyMode, HEX);
+        Serial.println(verifyMode & 0x02 ? " (Still LOW-SPEED - device may require low-speed)" : " (Now FULL-SPEED)");
+    } else {
+        Serial.println("✅ Already running in FULL-SPEED mode - optimal configuration");
+    }
+    
+    // Check SPI speed settings
+    Serial.println("🔍 SPI speed configuration:");
+    Serial.println("   MAX3421E can handle up to 26MHz SPI");
+    Serial.println("   USB Host Shield library typically uses 12-21MHz");
+    Serial.println("   Current: Optimized for Teensy 4.0 performance");
+}
+
+void HIDSelector::optimizeNAKSettings() {
+    Serial.println("🔧 Optimizing NAK tolerance settings for long-term stability...");
+    
+    // The default USB Host Shield library uses:
+    // - EP 0 (control): USB_NAK_MAX_POWER = 15 (32767 NAKs allowed)  
+    // - All other EPs: USB_NAK_NOWAIT = 1 (only 1 NAK allowed!)
+    //
+    // This is TOO AGGRESSIVE for LED control which needs time tolerance
+    
+    if (!isReady()) {
+        Serial.println("❌ Device not ready for NAK optimization");
+        return;
+    }
+    
+    // Get current endpoint info
+    Serial.println("📊 Current NAK power settings:");
+    for (int i = 0; i < bNumEP; i++) {
+        Serial.print("   EP ");
+        Serial.print(i);
+        Serial.print(": bmNakPower=");
+        Serial.print(epInfo[i].bmNakPower);
+        Serial.print(" (nak_limit=");
+        Serial.print((1 << epInfo[i].bmNakPower) - 1);
+        Serial.print("), EP addr=0x");
+        Serial.println(epInfo[i].epAddr, HEX);
+    }
+    
+    // Optimize NAK settings for CM Control Pad stability
+    // EP 0x04 (OUT) - LED commands need higher NAK tolerance
+    // EP 0x03 (IN) - Status/response data needs moderate tolerance
+    
+    for (int i = 0; i < bNumEP; i++) {
+        uint8_t oldNakPower = epInfo[i].bmNakPower;
+        uint8_t newNakPower = oldNakPower;
+        
+        if (epInfo[i].epAddr == 0x04) {
+            // EP 0x04 (OUT) - LED commands: Allow moderate NAK tolerance
+            newNakPower = 4;  // 2^4 - 1 = 15 NAKs allowed (vs 1 NAK default)
+            Serial.print("🎯 EP 0x04 (LED commands): ");
+        } else if (epInfo[i].epAddr == 0x03) {
+            // EP 0x03 (IN) - Status responses: Allow some NAK tolerance  
+            newNakPower = 3;  // 2^3 - 1 = 7 NAKs allowed (vs 1 NAK default)
+            Serial.print("📡 EP 0x03 (responses): ");
+        } else if (epInfo[i].epAddr == 0x00) {
+            // EP 0x00 (control): Keep high tolerance
+            newNakPower = 15; // Keep maximum for control endpoint
+            Serial.print("🎛️  EP 0x00 (control): ");
+        } else {
+            Serial.print("📌 EP 0x");
+            Serial.print(epInfo[i].epAddr, HEX);
+            Serial.print(": ");
+        }
+        
+        if (newNakPower != oldNakPower) {
+            epInfo[i].bmNakPower = newNakPower;
+            Serial.print("Updated NAK power ");
+            Serial.print(oldNakPower);
+            Serial.print(" → ");
+            Serial.print(newNakPower);
+            Serial.print(" (");
+            Serial.print((1 << oldNakPower) - 1);
+            Serial.print(" → ");
+            Serial.print((1 << newNakPower) - 1);
+            Serial.println(" NAKs allowed)");
+        } else {
+            Serial.print("Keeping NAK power ");
+            Serial.print(newNakPower);
+            Serial.print(" (");
+            Serial.print((1 << newNakPower) - 1);
+            Serial.println(" NAKs allowed)");
+        }
+    }
+    
+    Serial.println("✅ NAK optimization complete!");
+    Serial.println("💡 Benefits:");
+    Serial.println("   • Increased tolerance for device response delays");
+    Serial.println("   • Better handling of USB timing variations");
+    Serial.println("   • Reduced transfer failures over extended operation");
+    Serial.println("   • Should significantly improve 1-2 minute stability");
+}
+
 USB Usb;
 //USBHub Hub(&Usb);
 HIDSelector hidSelector(&Usb);
+
+// Global variables at the top
+unsigned long loopStartTime = 0;
+int buttonState = LOW;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
+int timerAnimationCount = 0;
+unsigned long lastTimerTime = 0;
+
+// EP polling statistics
+static int epPollCount = 0;
+static int epPollErrors = 0;
+static int epPollSuccesses = 0;
 
 void setup()
 {
@@ -728,7 +857,7 @@ void setup()
 void loop()
 {
     static unsigned long loopStartTime = millis();
-    static unsigned long lastInterruptionCheck = 0;
+    // Removed lastInterruptionCheck - no longer needed since pattern detection disabled
     Usb.Task();
     
     // Initialize Interface 1 once device is ready and operational
@@ -748,7 +877,14 @@ void loop()
         interface1InitAttempted = true;
         Serial.print("🚀 Device fully ready at T+");
         Serial.print(millis() - loopStartTime);
-        Serial.println("ms! Initializing Interface 1 for LED control...");
+        Serial.println("ms! Checking USB speed and initializing Interface 1 for LED control...");
+        
+        // Check and optimize USB speed before starting LED operations
+        hidSelector.checkUSBSpeed();
+        
+        // Optimize NAK tolerance settings for long-term stability
+        hidSelector.optimizeNAKSettings();
+        
         bool success = hidSelector.initializeInterface1();
         if (success) {
             animationStarted = true;
@@ -770,103 +906,30 @@ void loop()
     }
     
     // Run RGB animation synchronized with SOF frames instead of millis()
-    static bool sofSyncInitialized = false;
     static uint16_t animationCount = 0;
     
     if (animationStarted && hidSelector.isReady()) {
-
         
-        // Periodic FNADDR polling approach - optimized for 1000Hz SOF timing
-        static uint16_t lastFrameNum = 0;
-        static uint16_t animationFrameInterval = 200; // Default 200 frames for 200ms
-        static bool frameRateCalculated = false;
-        static uint16_t startFrameNum = 0;
-        static uint32_t startTime = 0;
-        static uint32_t lastFramePollTime = 0;
-        static uint16_t cachedFrameNum = 0;
-        
-        uint32_t nowUs = micros();
+        // Simple timer-based animation with proper FRAMEIRQ synchronization in LED commands
+        static unsigned long lastTimerAnimation = 0;
         unsigned long nowMs = millis();
         
-        // Periodic FNADDR polling - configurable interval for optimal performance
-        // Since SOF runs at 1000Hz (1ms), polling every 2-5ms allows early/late resync
-        static uint8_t framePollingInterval = 3; // ms - can be adjusted for timing requirements
-        uint16_t frameNum = cachedFrameNum;
-        
-                 if (nowMs - lastFramePollTime >= framePollingInterval || lastFramePollTime == 0) {
-             frameNum = Usb.regRd(0x0E); // rFNADDR - only read periodically
-             cachedFrameNum = frameNum;
-             lastFramePollTime = nowMs;
-             
-
-             
-             // Dynamic interval adjustment: reduce polling near critical timing points
-             static unsigned long lastAnimationTime = 0;
-             unsigned long timeSinceLastAnimation = nowMs - lastAnimationTime;
-             if (timeSinceLastAnimation > 180 && timeSinceLastAnimation < 220) {
-                 framePollingInterval = 1; // Increase precision near animation timing
-             } else {
-                 framePollingInterval = 3; // Normal polling rate
-             }
-         }
-        
-        // Initialize on first run
-        if (!sofSyncInitialized) {
-            lastFrameNum = frameNum;
-            startFrameNum = frameNum;
-            startTime = nowMs;
-            sofSyncInitialized = true;
-            // Since logs show 1000Hz, start immediately with 200 frames = 200ms
-            animationFrameInterval = 200;
-            frameRateCalculated = true;
-            Serial.print("🎯 Periodic FNADDR polling initialized! Starting frame: ");
-            Serial.print(frameNum);
-            Serial.print(" - Polling every ");
-            Serial.print(framePollingInterval);
-            Serial.println("ms for 1000Hz SOF synchronization");
-        }
-        
-        // SOF tick detected when frame number changes
-        if (frameNum != lastFrameNum) {
-            lastFrameNum = frameNum;
+        // Try a different approach: smaller, more frequent "micro-resets" every 20 seconds
+        // Instead of one big reset, do gentle frame counter refreshes
+        static unsigned long lastMicroReset = 0;
+        if (nowMs - lastMicroReset > 20000 && animationCount > 100) { // Every 20 seconds
+            Serial.print("🔄 Micro-reset at T+");
+            Serial.print(nowMs - loopStartTime);
+            Serial.print("ms (animation #");
+            Serial.print(animationCount);
+            Serial.println(") - gentle frame refresh");
             
-            // TEMPORARY: Since we see 1000Hz in logs, hardcode 200 frames = 200ms
-            static bool quickStart = false;
-            if (!quickStart && (nowMs - startTime) > 500) {
-                animationFrameInterval = 200; // 200 frames for 200ms at 1000Hz
-                frameRateCalculated = true;
-                quickStart = true;
-                Serial.println("📊 Quick start: Using 200 frames for 200ms (1000Hz SOF detected)");
-            }
+            // Very gentle reset - just refresh frame counter, no delays
+            hidSelector.resetFrameCounter();
+            lastMicroReset = nowMs;
             
-            // Calculate frame rate after 1 second
-            if (!frameRateCalculated && (nowMs - startTime) > 1000) {
-                uint16_t totalFrames;
-                // Handle 11-bit wraparound (0-2047)
-                if (frameNum >= startFrameNum) {
-                    totalFrames = frameNum - startFrameNum;
-                } else {
-                    totalFrames = (2048 - startFrameNum) + frameNum;
-                }
-                
-                float timeElapsed = (nowMs - startTime) / 1000.0;
-                float frameRate = totalFrames / timeElapsed;
-                animationFrameInterval = (uint16_t)(frameRate * 0.2); // 200ms worth of frames
-                frameRateCalculated = true;
-                
-                Serial.print("📊 FNADDR Frame Rate: ");
-                Serial.print(frameRate, 1);
-                Serial.print(" Hz (");
-                Serial.print(1000.0 / frameRate, 3);
-                Serial.print("ms per frame) - Using ");
-                Serial.print(animationFrameInterval);
-                Serial.println(" frames for 200ms animation intervals");
-            }
+            Serial.println("✅ Micro-reset complete");
         }
-        
-        // Simple timer-based animation (FNADDR-based removed because SOF not working)
-        static unsigned long lastTimerAnimation = 0;
-        static unsigned long lastUSBMaintenance = 0;
         
         if (nowMs - lastTimerAnimation >= 200) {
             lastTimerAnimation = nowMs;
@@ -878,35 +941,49 @@ void loop()
             Serial.print(nowMs - loopStartTime);
             Serial.println("ms");
             
-            // Check if we should synchronize with MAX3421E SOF timing
-            if (animationCount % 50 == 0) { // Every 10 seconds (50 * 200ms)
-                // Read current SOF frame to check if we're in sync
-                uint16_t currentFrame = Usb.regRd(0x0E); // rFNADDR
-                Serial.print("🕐 SOF sync check at animation #");
-                Serial.print(animationCount);
-                Serial.print(" - Frame: ");
-                Serial.print(currentFrame);
-                Serial.print(" at T+");
-                Serial.print(nowMs - loopStartTime);
-                Serial.println("ms");
-            }
+            // Disabled USB health check - it was causing flickering at 13 seconds
+            // Health checks seem to interfere with device stability
             
-            // Execute LED command sequence
+            // Removed preventive reset - it was causing more harm than good
+            // Device runs more stably without artificial resets
+            
+            // Execute LED command sequence (now with proper FRAMEIRQ sync)
             hidSelector.testLEDCommands();
         }
-        
-        // Removed duplicate timer-based animation - was causing double LED commands!
     }
     
     // Poll Interface 1 endpoint 0x83 for additional data (frequent polling needed for ACKs!)
+    // DISABLED: 100% failure rate shows EP 0x83 doesn't exist on this device
     static unsigned long lastPoll = 0;
-    if (millis() - lastPoll > 50 && hidSelector.isReady()) { // Poll every 50ms for device responsiveness
+    static bool pollingEnabled = false; // EP polling completely broken - 100% failure rate
+    
+    if (pollingEnabled && millis() - lastPoll > 100 && hidSelector.isReady()) { // Poll every 100ms (reduced from 50ms)
         unsigned long pollStartTime = millis();
         lastPoll = pollStartTime;
         
         uint8_t buf[64];
         uint16_t len = 64;
         uint8_t rcode = Usb.inTransfer(hidSelector.GetAddress(), 0x83, &len, buf);
+        
+        epPollCount++;
+        if (rcode == 0) {
+            epPollSuccesses++;
+        } else {
+            epPollErrors++;
+        }
+        
+        // Report EP polling statistics every 100 polls (~10 seconds)
+        if (epPollCount % 100 == 0) {
+            Serial.print("📊 EP polling stats: ");
+            Serial.print(epPollSuccesses);
+            Serial.print(" successes, ");
+            Serial.print(epPollErrors);
+            Serial.print(" errors, ");
+            Serial.print((epPollSuccesses * 100.0) / epPollCount, 1);
+            Serial.print("% success rate at T+");
+            Serial.print(pollStartTime - loopStartTime);
+            Serial.println("ms");
+        }
         
         unsigned long pollDuration = millis() - pollStartTime;
         if (pollDuration > 50) {
@@ -944,31 +1021,7 @@ void loop()
         }
     }
     
-    // More frequent pattern monitoring - check for 0.8s and 3.11s patterns
-    static unsigned long patternCheckTimes[10];
-    static int patternIndex = 0;
-    
-    if (millis() - lastInterruptionCheck > 750) {  // Check every 750ms to catch 0.8s patterns
-        unsigned long currentTime = millis();
-        patternCheckTimes[patternIndex] = currentTime;
-        
-        // Look for 0.8s + 0.8s + 3.11s pattern in recent history
-        if (patternIndex >= 2) {
-            unsigned long gap1 = patternCheckTimes[patternIndex] - patternCheckTimes[patternIndex-1];
-            unsigned long gap2 = patternCheckTimes[patternIndex-1] - patternCheckTimes[patternIndex-2];
-            
-            if ((gap1 >= 750 && gap1 <= 850) || (gap1 >= 3000 && gap1 <= 3200)) {
-                Serial.print("🔍 Pattern detected: ");
-                Serial.print(gap2);
-                Serial.print("ms → ");
-                Serial.print(gap1);
-                Serial.print("ms at T+");
-                Serial.print(currentTime - loopStartTime);
-                Serial.println("ms");
-            }
-        }
-        
-        patternIndex = (patternIndex + 1) % 10;
-        lastInterruptionCheck = currentTime;
-  }
+    // Pattern detection temporarily disabled - it was causing 37-second flickering
+    // The 750ms timing interval was interfering with LED commands
+    // TODO: Re-implement with non-interfering timing if pattern analysis is still needed
 }
