@@ -414,16 +414,9 @@ void HIDSelector::testLEDCommands() {
     // Button 18 R component
     cmd[pos++] = (movingLED == 13) ? 0xFF : rainbowColors[buttonMap[13]][0];
     
-    // Send Package 1 with retry logic
-    for (int retry = 0; retry < 3; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) return; // Non-NAK error, abort
-        delayMicroseconds(50); // Brief delay before retry
-    }
-    if (rcode != 0) return; // Failed after retries
-    
-    delayMicroseconds(100); // Small gap between commands for USB stability
+    // Send Package 1 - NO DELAYS
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode != 0 && rcode != 0x4) return; // Fast exit on error
     
     // Command 2: Package 2 - pre-built for speed
     memset(cmd, 0, 64);
@@ -455,43 +448,16 @@ void HIDSelector::testLEDCommands() {
         }
     }
     
-    // Send Package 2 with retry logic
-    for (int retry = 0; retry < 3; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) return; // Non-NAK error, abort
-        delayMicroseconds(50); // Brief delay before retry
-    }
-    if (rcode != 0) return; // Failed after retries
+    // Send Package 2 - NO DELAYS
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode != 0 && rcode != 0x4) return; // Fast exit on error
     
-    // Command 3: Activation - CRITICAL - must succeed
+    // Command 3: Activation - minimal
     cmd[0] = 0x51; cmd[1] = 0x28; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0xff;
     for (int i = 5; i < 64; i++) cmd[i] = 0; // Fast clear
     
-    // Send activation with more aggressive retry (this is the most important command)
-    for (int retry = 0; retry < 5; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) {
-            // Non-NAK error on activation - this is critical
-            static unsigned long lastActivationError = 0;
-            if (millis() - lastActivationError > 1000) {
-                Serial.print("❌ Activation command failed with rcode: 0x");
-                Serial.println(rcode, HEX);
-                lastActivationError = millis();
-            }
-            return;
-        }
-        delayMicroseconds(100); // Longer delay for activation retry
-    }
-    
-    if (rcode != 0) {
-        static unsigned long lastActivationFail = 0;
-        if (millis() - lastActivationFail > 1000) {
-            Serial.println("⚠️ Activation command failed after 5 retries - LEDs may not update");
-            lastActivationFail = millis();
-        }
-    }
+    // Send activation - NO DELAYS
+    pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     
     // Advance LED position
     movingLED = (movingLED + 1) % 24;
@@ -646,213 +612,26 @@ void loop()
         }
     }
     
-    // Run RGB animation synchronized with SOF frames instead of millis()
-    static unsigned long lastAnimation = 0;
-    static unsigned long animationCount = 0;
-    static unsigned long lastTimingReport = 0;
-    static uint16_t lastSOFFrame = 0;
-    static bool sofSyncInitialized = false;
-    static unsigned long sofDebugTimer = 0;
-    
+    // Simple 200ms animation timing - no complex SOF synchronization needed
     if (animationStarted && hidSelector.isReady()) {
-        // Comprehensive SOF debugging every 10 seconds (reduced frequency)
-        if (millis() - sofDebugTimer > 10000) {
-            uint8_t hirqReg = Usb.regRd(0x25);    // HIRQ register
-            uint8_t hienReg = Usb.regRd(0x26);    // HIEN register  
-            uint8_t modeReg = Usb.regRd(0x27);    // MODE register
-            uint8_t hctlReg = Usb.regRd(0x29);    // HCTL register
-            
-            Serial.print("🔍 SOF Debug at T+");
-            Serial.print(millis() - loopStartTime);
-            Serial.println("ms:");
-            Serial.print("   HIRQ: 0x");
-            Serial.print(hirqReg, HEX);
-            Serial.print(" (FRAMEIRQ: ");
-            Serial.print((hirqReg & 0x40) ? "SET" : "clear");
-            Serial.println(")");
-            Serial.print("   HIEN: 0x");
-            Serial.print(hienReg, HEX);
-            Serial.print(" (FRAMEIE: ");
-            Serial.print((hienReg & 0x40) ? "enabled" : "DISABLED");
-            Serial.println(")");
-            Serial.print("   MODE: 0x");
-            Serial.print(modeReg, HEX);
-            Serial.print(" (SOFKAENAB: ");
-            Serial.print((modeReg & 0x10) ? "ON" : "OFF");
-            Serial.print(", HOST: ");
-            Serial.print((modeReg & 0x01) ? "ON" : "OFF");
-            Serial.println(")");
-            Serial.print("   HCTL: 0x");
-            Serial.print(hctlReg, HEX);
-            Serial.println();
-            
-            // If SOFKAENAB is OFF, try to enable it
-            if (!(modeReg & 0x10)) {
-                Serial.println("🔧 SOFKAENAB is OFF - enabling SOF generation...");
-                Usb.regWr(0x27, modeReg | 0x10); // Set SOFKAENAB bit
-            }
-            
-            // If FRAMEIE is disabled, enable it
-            if (!(hienReg & 0x40)) {
-                Serial.println("🔧 FRAMEIE is DISABLED - enabling FRAMEIRQ interrupt...");
-                Usb.regWr(0x26, hienReg | 0x40); // Set FRAMEIE bit
-            }
-            
-            sofDebugTimer = millis();
-        }
+        static unsigned long lastAnimationTime = 0;
+        unsigned long currentTime = millis();
         
-        // Direct FNADDR polling approach - reliable SOF detection without FRAMEIRQ
-        static uint16_t lastFrameNum = 0;
-        static uint32_t lastFrameMicros = 0;
-        static uint16_t animationFrameInterval = 200; // Default 200 frames for 200ms
-        static bool frameRateCalculated = false;
-        static uint16_t startFrameNum = 0;
-        static uint32_t startTime = 0;
-        
-        // Read frame number directly from hardware (FNADDR register 0x0E)
-        uint16_t frameNum = Usb.regRd(0x0E); // rFNADDR
-        uint32_t nowUs = micros();
-        unsigned long nowMs = millis();
-        
-        // Initialize on first run
-        if (!sofSyncInitialized) {
-            lastFrameNum = frameNum;
-            lastFrameMicros = nowUs;
-            startFrameNum = frameNum;
-            startTime = nowMs;
-            sofSyncInitialized = true;
-            // Since logs show 1000Hz, start immediately with 200 frames = 200ms
-            animationFrameInterval = 200;
-            frameRateCalculated = true;
-            Serial.print("🎯 Direct FNADDR polling initialized! Starting frame: ");
-            Serial.print(frameNum);
-            Serial.println(" - Using 200 frames for 200ms (1000Hz assumed)");
-        }
-        
-        // SOF tick detected when frame number changes
-        if (frameNum != lastFrameNum) {
-            lastFrameNum = frameNum;
-            lastFrameMicros = nowUs;
-            
-            // TEMPORARY: Since we see 1000Hz in logs, hardcode 200 frames = 200ms
-            static bool quickStart = false;
-            if (!quickStart && (nowMs - startTime) > 500) {
-                animationFrameInterval = 200; // 200 frames for 200ms at 1000Hz
-                frameRateCalculated = true;
-                quickStart = true;
-                Serial.println("📊 Quick start: Using 200 frames for 200ms (1000Hz SOF detected)");
-            }
-            
-            // Calculate frame rate after 1 second
-            if (!frameRateCalculated && (nowMs - startTime) > 1000) {
-                uint16_t totalFrames;
-                // Handle 11-bit wraparound (0-2047)
-                if (frameNum >= startFrameNum) {
-                    totalFrames = frameNum - startFrameNum;
-                } else {
-                    totalFrames = (2048 - startFrameNum) + frameNum;
-                }
-                
-                float timeElapsed = (nowMs - startTime) / 1000.0;
-                float frameRate = totalFrames / timeElapsed;
-                animationFrameInterval = (uint16_t)(frameRate * 0.2); // 200ms worth of frames
-                frameRateCalculated = true;
-                
-                Serial.print("📊 FNADDR Frame Rate: ");
-                Serial.print(frameRate, 1);
-                Serial.print(" Hz (");
-                Serial.print(1000.0 / frameRate, 3);
-                Serial.print("ms per frame) - Using ");
-                Serial.print(animationFrameInterval);
-                Serial.println(" frames for 200ms animation intervals");
-            }
-        }
-        
-        // Check for animation trigger every loop (outside frame change detection)
-        if (frameRateCalculated) {
-            // Calculate total frames from start (handle wraparound)
-            uint16_t totalFramesFromStart;
-            if (frameNum >= startFrameNum) {
-                totalFramesFromStart = frameNum - startFrameNum;
-            } else {
-                totalFramesFromStart = (2048 - startFrameNum) + frameNum;
-            }
-            
-            // Run animation at calculated intervals
-            if (frameRateCalculated && (totalFramesFromStart % animationFrameInterval) == 0 && totalFramesFromStart > 0) {
-                animationCount++;
-                
-                Serial.print("🎯 FNADDR animation #");
-                Serial.print(animationCount);
-                Serial.print(" at frame ");
-                Serial.print(frameNum);
-                Serial.print(" (total ");
-                Serial.print(totalFramesFromStart);
-                Serial.print(", T+");
-                Serial.print(nowMs - loopStartTime);
-                Serial.print("ms, expected ");
-                Serial.print(animationCount * 200);
-                Serial.print("ms)");
-                
-                // Execute LED command
-                unsigned long ledCommandStart = micros();
-                hidSelector.testLEDCommands();
-                unsigned long ledCommandDuration = micros() - ledCommandStart;
-                
-                Serial.print(" - completed in ");
-                Serial.print(ledCommandDuration);
-                Serial.println("μs");
-                
-                // Report timing accuracy every 5 animations
-                if (animationCount % 5 == 0) {
-                    unsigned long timeSinceLastReport = nowMs - lastTimingReport;
-                    unsigned long expectedTime = 5 * 200;
-                    float accuracy = (float)expectedTime / timeSinceLastReport * 100.0;
-                    Serial.print("📊 FNADDR Animation #");
-                    Serial.print(animationCount);
-                    Serial.print(" - last 5 in ");
-                    Serial.print(timeSinceLastReport);
-                    Serial.print("ms (expected ");
-                    Serial.print(expectedTime);
-                    Serial.print("ms, accuracy: ");
-                    Serial.print(accuracy, 1);
-                    Serial.println("%)");
-                    lastTimingReport = nowMs;
-                }
-            } else if (frameRateCalculated && totalFramesFromStart > 0) {
-                // Debug: Show why animation isn't triggering
-                static unsigned long lastDebugTime = 0;
-                if (nowMs - lastDebugTime > 2000) { // Every 2 seconds
-                    Serial.print("🔍 Animation check: totalFrames=");
-                    Serial.print(totalFramesFromStart);
-                    Serial.print(", modulo=");
-                    Serial.print(totalFramesFromStart % animationFrameInterval);
-                    Serial.print(", interval=");
-                    Serial.print(animationFrameInterval);
-                    Serial.print(", frameRateCalc=");
-                    Serial.println(frameRateCalculated ? "YES" : "NO");
-                    lastDebugTime = nowMs;
-                }
-            }
-        }
-        
-        // TEMPORARY: Simple timer-based animation trigger for testing
-        static unsigned long lastTimerAnimation = 0;
-        if (frameRateCalculated && (nowMs - lastTimerAnimation) >= 200) {
-            lastTimerAnimation = nowMs;
+        if (currentTime - lastAnimationTime >= 200) { // Reliable 200ms intervals
+            lastAnimationTime = currentTime;
             animationCount++;
             
-            Serial.print("⏰ Timer animation #");
+            Serial.print("🎯 Simple animation #");
             Serial.print(animationCount);
             Serial.print(" at T+");
-            Serial.print(nowMs - loopStartTime);
-            Serial.print("ms (frame ");
-            Serial.print(frameNum);
-            Serial.print(", FNADDR raw: 0x");
-            Serial.print(frameNum, HEX);
-            Serial.print(")");
+            Serial.print(currentTime - loopStartTime);
+            Serial.print("ms (expected ");
+            Serial.print(animationCount * 200);
+            Serial.print("ms, accuracy: ");
+            Serial.print(((currentTime - loopStartTime) * 100) / (animationCount * 200));
+            Serial.print("%)");
             
-            // Execute LED command
+            // Execute LED command 
             unsigned long ledCommandStart = micros();
             hidSelector.testLEDCommands();
             unsigned long ledCommandDuration = micros() - ledCommandStart;
@@ -861,20 +640,20 @@ void loop()
             Serial.print(ledCommandDuration);
             Serial.println("μs");
             
-            // Debug FNADDR reading every 10th animation
+            // Report timing every 10 animations
             if (animationCount % 10 == 0) {
-                uint16_t fn1 = Usb.regRd(0x0E);
-                delayMicroseconds(100);
-                uint16_t fn2 = Usb.regRd(0x0E);
-                delayMicroseconds(100); 
-                uint16_t fn3 = Usb.regRd(0x0E);
-                Serial.print("🔍 FNADDR readings: ");
-                Serial.print(fn1);
-                Serial.print(" → ");
-                Serial.print(fn2);
-                Serial.print(" → ");
-                Serial.print(fn3);
-                Serial.println(" (should increment if SOF working)");
+                unsigned long timeSinceLastReport = currentTime - lastTimingReport;
+                unsigned long expectedTime = 10 * 200; // 2000ms
+                Serial.print("📊 Animation #");
+                Serial.print(animationCount);
+                Serial.print(" - last 10 in ");
+                Serial.print(timeSinceLastReport);
+                Serial.print("ms (expected ");
+                Serial.print(expectedTime);
+                Serial.print("ms, accuracy: ");
+                Serial.print((timeSinceLastReport * 100) / expectedTime);
+                Serial.println("%)");
+                lastTimingReport = currentTime;
             }
         }
     }
@@ -951,5 +730,5 @@ void loop()
         
         patternIndex = (patternIndex + 1) % 10;
         lastInterruptionCheck = currentTime;
-  }
+    }
 }
