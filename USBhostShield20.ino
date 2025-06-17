@@ -26,6 +26,7 @@ public:
     void testLEDCommands();
     void waitForUSBFrameSync();
     void waitForFIFOReady();
+    void resetDevice(); // Device recovery function
     
     // MAX3421E timing synchronization methods
 
@@ -354,6 +355,12 @@ void HIDSelector::testLEDCommands() {
     static uint8_t movingLED = 0; // Which LED is currently bright (0-23)
     uint8_t cmd[64];
     uint8_t rcode;
+    static unsigned long debugCounter = 0;
+    debugCounter++;
+    
+    Serial.print("🔍 LED command #");
+    Serial.print(debugCounter);
+    Serial.print(" starting... ");
     
     // Pre-calculated rainbow colors for maximum speed
     static const uint8_t rainbowColors[24][3] = {
@@ -414,14 +421,29 @@ void HIDSelector::testLEDCommands() {
     // Button 18 R component
     cmd[pos++] = (movingLED == 13) ? 0xFF : rainbowColors[buttonMap[13]][0];
     
-    // Send Package 1 with retry logic
-    for (int retry = 0; retry < 3; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) return; // Non-NAK error, abort
-        delayMicroseconds(50); // Brief delay before retry
+    // Send Package 1 with detailed logging
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    Serial.print("📤 Pkg1: rcode=0x");
+    Serial.print(rcode, HEX);
+    if (rcode == 0) {
+        Serial.print(" ✅ | ");
+    } else {
+        Serial.print(" ❌ | ");
+        for (int retry = 0; retry < 2; retry++) {
+            delayMicroseconds(50);
+            rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+            Serial.print("retry=0x");
+            Serial.print(rcode, HEX);
+            Serial.print(" ");
+            if (rcode == 0) break;
+            if (rcode != 0x4) break; // Non-NAK error
+        }
+        if (rcode != 0) {
+            Serial.println("FAILED");
+            return;
+        }
+        Serial.print("recovered | ");
     }
-    if (rcode != 0) return; // Failed after retries
     
     delayMicroseconds(100); // Small gap between commands for USB stability
     
@@ -456,41 +478,56 @@ void HIDSelector::testLEDCommands() {
     }
     
     // Send Package 2 with retry logic
+    Serial.print("📤 Sending Package 2... ");
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) return; // Non-NAK error, abort
+        Serial.print("rcode=0x");
+        Serial.print(rcode, HEX);
+        if (rcode == 0) {
+            Serial.println(" ✅");
+            break; // Success
+        }
+        Serial.print(" ❌");
+        if (rcode != 0x4) {
+            Serial.print(" (non-NAK error, aborting)");
+            Serial.println();
+            return; // Non-NAK error, abort
+        }
+        Serial.print(" (NAK, retry)");
         delayMicroseconds(50); // Brief delay before retry
     }
-    if (rcode != 0) return; // Failed after retries
+    if (rcode != 0) {
+        Serial.println("📤 Package 2 FAILED after retries");
+        return; // Failed after retries
+    }
     
     // Command 3: Activation - CRITICAL - must succeed
     cmd[0] = 0x51; cmd[1] = 0x28; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0xff;
     for (int i = 5; i < 64; i++) cmd[i] = 0; // Fast clear
     
     // Send activation with more aggressive retry (this is the most important command)
+    Serial.print("📤 Sending Activation command... ");
     for (int retry = 0; retry < 5; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
-        if (rcode == 0) break; // Success
-        if (rcode != 0x4) {
-            // Non-NAK error on activation - this is critical
-            static unsigned long lastActivationError = 0;
-            if (millis() - lastActivationError > 1000) {
-                Serial.print("❌ Activation command failed with rcode: 0x");
-                Serial.println(rcode, HEX);
-                lastActivationError = millis();
-            }
-            return;
+        Serial.print("rcode=0x");
+        Serial.print(rcode, HEX);
+        if (rcode == 0) {
+            Serial.println(" ✅");
+            break; // Success
         }
+        Serial.print(" ❌");
+        if (rcode != 0x4) {
+            Serial.print(" (non-NAK error, aborting)");
+            Serial.println();
+            return; // Non-NAK error on activation - this is critical
+        }
+        Serial.print(" (NAK, retry)");
         delayMicroseconds(100); // Longer delay for activation retry
     }
     
     if (rcode != 0) {
-        static unsigned long lastActivationFail = 0;
-        if (millis() - lastActivationFail > 1000) {
-            Serial.println("⚠️ Activation command failed after 5 retries - LEDs may not update");
-            lastActivationFail = millis();
-        }
+        Serial.println("📤 Activation command FAILED after 5 retries - LEDs may not update");
+        return; // Failed after retries
     }
     
     // Advance LED position
@@ -508,6 +545,28 @@ void HIDSelector::waitForFIFOReady() {
     // Minimal delay only for immediate FIFO stabilization
     // SOF synchronization eliminates need for frame timing delays
     delayMicroseconds(50); // Reduced from 200μs - just enough for FIFO
+}
+
+// Device recovery function for when communication fails
+void HIDSelector::resetDevice() {
+    Serial.println("🔄 Attempting device recovery...");
+    
+    // Try to reinitialize the LED interface
+    uint8_t cmd[64];
+    memset(cmd, 0, 64);
+    
+    // Send mode reset command
+    cmd[0] = 0x56; cmd[1] = 0x81;
+    uint8_t rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    
+    if (rcode == 0) {
+        Serial.println("✅ Device recovery successful");
+    } else {
+        Serial.print("❌ Device recovery failed, rcode: 0x");
+        Serial.println(rcode, HEX);
+    }
+    
+    delay(100); // Give device time to reset
 }
 
 USB Usb;
@@ -536,79 +595,9 @@ void loop()
 {
     static unsigned long loopStartTime = millis();
     static unsigned long lastInterruptionCheck = 0;
-    static unsigned long lastLoopTime = 0;
-    
-    // Track loop execution timing for pattern detection
-    unsigned long currentLoopTime = millis();
-    unsigned long loopInterval = currentLoopTime - lastLoopTime;
-    if (lastLoopTime > 0 && loopInterval > 100) {
-        Serial.print("🕐 Long loop interval: ");
-        Serial.print(loopInterval);
-        Serial.print("ms at T+");
-        Serial.print(currentLoopTime - loopStartTime);
-        Serial.println("ms");
-    }
-    lastLoopTime = currentLoopTime;
-    
-    // Time USB Task execution
-    unsigned long usbTaskStart = millis();
     Usb.Task();
-    unsigned long usbTaskDuration = millis() - usbTaskStart;
-    if (usbTaskDuration > 10) {
-        Serial.print("⚠️ Slow USB Task: ");
-        Serial.print(usbTaskDuration);
-        Serial.print("ms at T+");
-        Serial.print(usbTaskStart - loopStartTime);
-        Serial.println("ms");
-    }
     
-    // Monitor SOF frame timing from MAX3421E
-    static unsigned long lastSOFCheck = 0;
-    static unsigned long sofFrameCount = 0;
-    static unsigned long lastFrameReport = 0;
-    
-    if (hidSelector.isReady() && millis() - lastSOFCheck >= 1) {
-        // Check HIRQ register (R25) for FRAMEIRQ bit
-        uint8_t hirqReg = Usb.regRd(0x25);
-        if (hirqReg & 0x40) { // FRAMEIRQ bit (bit 6) indicates SOF was sent
-            sofFrameCount++;
-            
-            // Clear the FRAMEIRQ by writing 1 to it
-            Usb.regWr(0x25, 0x40);
-            
-            // Report SOF frame statistics every 100 frames (100ms)
-            if (sofFrameCount % 100 == 0) {
-                unsigned long currentTime = millis();
-                unsigned long frameInterval = currentTime - lastFrameReport;
-                Serial.print("📡 SOF Frames 100-");
-                Serial.print(sofFrameCount);
-                Serial.print(" completed in ");
-                Serial.print(frameInterval);
-                Serial.print("ms (expected 100ms) at T+");
-                Serial.print(currentTime - loopStartTime);
-                Serial.println("ms");
-                lastFrameReport = currentTime;
-            }
-            
-            // Check for frame timing anomalies that might correlate with patterns
-            static unsigned long lastFrameTime = 0;
-            unsigned long currentFrameTime = millis();
-            if (lastFrameTime > 0) {
-                unsigned long frameGap = currentFrameTime - lastFrameTime;
-                if (frameGap > 2 || frameGap == 0) { // Frame gaps should be ~1ms
-                    Serial.print("⚠️ SOF Frame timing anomaly: ");
-                    Serial.print(frameGap);
-                    Serial.print("ms gap between frames at T+");
-                    Serial.print(currentFrameTime - loopStartTime);
-                    Serial.println("ms");
-                }
-            }
-            lastFrameTime = currentFrameTime;
-        }
-        lastSOFCheck = millis();
-    }
-    
-    // Initialize Interface 1 with proper timing after device is detected
+    // Initialize Interface 1 once device is ready and operational
     static bool interface1InitAttempted = false;
     static bool animationStarted = false;
     static unsigned long deviceReadyTime = 0;
@@ -647,12 +636,9 @@ void loop()
     }
     
     // Run RGB animation synchronized with SOF frames instead of millis()
-    static unsigned long lastAnimation = 0;
-    static unsigned long animationCount = 0;
-    static unsigned long lastTimingReport = 0;
-    static uint16_t lastSOFFrame = 0;
     static bool sofSyncInitialized = false;
     static unsigned long sofDebugTimer = 0;
+    static uint16_t animationCount = 0;
     
     if (animationStarted && hidSelector.isReady()) {
         // Comprehensive SOF debugging every 10 seconds (reduced frequency)
@@ -686,16 +672,22 @@ void loop()
             Serial.print(hctlReg, HEX);
             Serial.println();
             
-            // If SOFKAENAB is OFF, try to enable it
-            if (!(modeReg & 0x10)) {
-                Serial.println("🔧 SOFKAENAB is OFF - enabling SOF generation...");
-                Usb.regWr(0x27, modeReg | 0x10); // Set SOFKAENAB bit
+            // Always ensure SOF generation is enabled (library keeps disabling it)
+            if (!(modeReg & 0x10)) { // SOFKAENAB disabled
+                Usb.regWr(0x27, modeReg | 0x10); // Re-enable SOF generation
             }
             
-            // If FRAMEIE is disabled, enable it
-            if (!(hienReg & 0x40)) {
-                Serial.println("🔧 FRAMEIE is DISABLED - enabling FRAMEIRQ interrupt...");
-                Usb.regWr(0x26, hienReg | 0x40); // Set FRAMEIE bit
+            // CRITICAL ROOT CAUSE FIX: Prevent HOST mode loss
+            if (!(modeReg & 0x01)) { // HOST bit disabled - this causes communication failure!
+                Serial.print("🚨 HOST mode lost! Restoring... MODE was 0x");
+                Serial.print(modeReg, HEX);
+                Usb.regWr(0x27, 0x11); // HOST=1, SOFKAENAB=1
+                Serial.println(" -> restored");
+            }
+            
+            // Re-enable FRAMEIRQ if disabled (reuse existing hienReg variable)
+            if (!(hienReg & 0x40)) { // FRAMEIE disabled
+                Usb.regWr(0x26, hienReg | 0x40); // Re-enable FRAMEIRQ
             }
             
             sofDebugTimer = millis();
@@ -703,7 +695,6 @@ void loop()
         
         // Direct FNADDR polling approach - reliable SOF detection without FRAMEIRQ
         static uint16_t lastFrameNum = 0;
-        static uint32_t lastFrameMicros = 0;
         static uint16_t animationFrameInterval = 200; // Default 200 frames for 200ms
         static bool frameRateCalculated = false;
         static uint16_t startFrameNum = 0;
@@ -717,7 +708,6 @@ void loop()
         // Initialize on first run
         if (!sofSyncInitialized) {
             lastFrameNum = frameNum;
-            lastFrameMicros = nowUs;
             startFrameNum = frameNum;
             startTime = nowMs;
             sofSyncInitialized = true;
@@ -732,7 +722,6 @@ void loop()
         // SOF tick detected when frame number changes
         if (frameNum != lastFrameNum) {
             lastFrameNum = frameNum;
-            lastFrameMicros = nowUs;
             
             // TEMPORARY: Since we see 1000Hz in logs, hardcode 200 frames = 200ms
             static bool quickStart = false;
@@ -794,8 +783,16 @@ void loop()
                 Serial.print(animationCount * 200);
                 Serial.print("ms)");
                 
-                // Execute LED command
+                // Execute LED command with comprehensive failure detection
+                Serial.print("📤 Starting LED command sequence... ");
                 unsigned long ledCommandStart = micros();
+                
+                // Check USB host state before sending commands
+                uint8_t usbState = Usb.getUsbTaskState();
+                Serial.print("USB state: 0x");
+                Serial.print(usbState, HEX);
+                Serial.print(" | ");
+                
                 hidSelector.testLEDCommands();
                 unsigned long ledCommandDuration = micros() - ledCommandStart;
                 
@@ -803,21 +800,45 @@ void loop()
                 Serial.print(ledCommandDuration);
                 Serial.println("μs");
                 
-                // Report timing accuracy every 5 animations
-                if (animationCount % 5 == 0) {
-                    unsigned long timeSinceLastReport = nowMs - lastTimingReport;
-                    unsigned long expectedTime = 5 * 200;
-                    float accuracy = (float)expectedTime / timeSinceLastReport * 100.0;
-                    Serial.print("📊 FNADDR Animation #");
-                    Serial.print(animationCount);
-                    Serial.print(" - last 5 in ");
-                    Serial.print(timeSinceLastReport);
-                    Serial.print("ms (expected ");
-                    Serial.print(expectedTime);
-                    Serial.print("ms, accuracy: ");
-                    Serial.print(accuracy, 1);
-                    Serial.println("%)");
-                    lastTimingReport = nowMs;
+                // Root cause analysis - detect failure patterns
+                static unsigned long lastSuccessfulCommand = 0;
+                static uint16_t failureCount = 0;
+                
+                if (ledCommandDuration < 300) {
+                    failureCount++;
+                    Serial.print("⚠️ Suspiciously fast command (");
+                    Serial.print(ledCommandDuration);
+                    Serial.print("μs) - possible failure #");
+                    Serial.print(failureCount);
+                    Serial.print(" | Time since last success: ");
+                    Serial.print(nowMs - lastSuccessfulCommand);
+                    Serial.println("ms");
+                    
+                    if (failureCount >= 2) {
+                        Serial.println("🔍 ROOT CAUSE ANALYSIS:");
+                        Serial.print("   - USB Task State: 0x");
+                        Serial.println(Usb.getUsbTaskState(), HEX);
+                        Serial.print("   - Device Address: ");
+                        Serial.println(hidSelector.GetAddress());
+                        Serial.print("   - Device Ready: ");
+                        Serial.println(hidSelector.isReady() ? "YES" : "NO");
+                        
+                        // Check USB registers
+                        uint8_t hirq = Usb.regRd(0x25);
+                        uint8_t hien = Usb.regRd(0x26);
+                        Serial.print("   - HIRQ: 0x");
+                        Serial.print(hirq, HEX);
+                        Serial.print(" | HIEN: 0x");
+                        Serial.println(hien, HEX);
+                    }
+                } else {
+                    lastSuccessfulCommand = nowMs;
+                    if (failureCount > 0) {
+                        Serial.print("✅ Command recovered after ");
+                        Serial.print(failureCount);
+                        Serial.println(" failures");
+                    }
+                    failureCount = 0;
                 }
             } else if (frameRateCalculated && totalFramesFromStart > 0) {
                 // Debug: Show why animation isn't triggering
@@ -852,14 +873,63 @@ void loop()
             Serial.print(frameNum, HEX);
             Serial.print(")");
             
-            // Execute LED command
+            // Execute LED command with comprehensive failure detection
+            Serial.print("📤 Starting LED command sequence... ");
             unsigned long ledCommandStart = micros();
+            
+            // Check USB host state before sending commands
+            uint8_t usbState = Usb.getUsbTaskState();
+            Serial.print("USB state: 0x");
+            Serial.print(usbState, HEX);
+            Serial.print(" | ");
+            
             hidSelector.testLEDCommands();
             unsigned long ledCommandDuration = micros() - ledCommandStart;
             
             Serial.print(" - completed in ");
             Serial.print(ledCommandDuration);
             Serial.println("μs");
+            
+            // Root cause analysis - detect failure patterns
+            static unsigned long lastSuccessfulCommand = 0;
+            static uint16_t failureCount = 0;
+            
+            if (ledCommandDuration < 300) {
+                failureCount++;
+                Serial.print("⚠️ Suspiciously fast command (");
+                Serial.print(ledCommandDuration);
+                Serial.print("μs) - possible failure #");
+                Serial.print(failureCount);
+                Serial.print(" | Time since last success: ");
+                Serial.print(nowMs - lastSuccessfulCommand);
+                Serial.println("ms");
+                
+                if (failureCount >= 2) {
+                    Serial.println("🔍 ROOT CAUSE ANALYSIS:");
+                    Serial.print("   - USB Task State: 0x");
+                    Serial.println(Usb.getUsbTaskState(), HEX);
+                    Serial.print("   - Device Address: ");
+                    Serial.println(hidSelector.GetAddress());
+                    Serial.print("   - Device Ready: ");
+                    Serial.println(hidSelector.isReady() ? "YES" : "NO");
+                    
+                    // Check USB registers
+                    uint8_t hirq = Usb.regRd(0x25);
+                    uint8_t hien = Usb.regRd(0x26);
+                    Serial.print("   - HIRQ: 0x");
+                    Serial.print(hirq, HEX);
+                    Serial.print(" | HIEN: 0x");
+                    Serial.println(hien, HEX);
+                }
+            } else {
+                lastSuccessfulCommand = nowMs;
+                if (failureCount > 0) {
+                    Serial.print("✅ Command recovered after ");
+                    Serial.print(failureCount);
+                    Serial.println(" failures");
+                }
+                failureCount = 0;
+            }
             
             // Debug FNADDR reading every 10th animation
             if (animationCount % 10 == 0) {
