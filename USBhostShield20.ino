@@ -1,223 +1,250 @@
-#include <SPI.h>
-#include <Usb.h>
+#include <hidcomposite.h>
 #include <usbhub.h>
-#include <hidboot.h>
-#include "CMControlPad.h"
 
+// Satisfy the IDE, which needs to see the include statment in the ino too.
+#ifdef dobogusinclude
+#include <spi4teensy3.h>
+#endif
+#include <SPI.h>
 
-USB Usb;
-CMControlPad myPad(&Usb);
+// Override HIDComposite to be able to select which interface we want to hook into
+class HIDSelector : public HIDComposite
+{
+private:
+    bool interface1Initialized = false;
+    
+public:
+    HIDSelector(USB *p) : HIDComposite(p) {};
+    
+    // Add method to initialize Interface 1
+    void initializeInterface1();
+    bool sendInitializationSequence();
 
-uint8_t usbstate;
-uint8_t laststate;
-USB_DEVICE_DESCRIPTOR devDesc;
-uint32_t lastErrorTime = 0;
-uint8_t consecutiveErrors = 0;
-uint32_t lastTransferTime = 0;
-uint32_t lastPollTime = 0;
+protected:
+    void ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t len, uint8_t *buf); // Called by the HIDComposite library
+    bool SelectInterface(uint8_t iface, uint8_t proto);
+    uint8_t OnInitSuccessful(); // Override to add our initialization
+};
 
-void setup() {
-  Serial.begin(115200);
-  while (!Serial) {
-    ; // Wait for serial port to connect
-  }
-  Serial.println("\n\n🔌 USB Host starting...");
-  
-  // Initialize SPI
-  Serial.println("📡 Initializing SPI...");
-  SPI.begin();
-  pinMode(SS, OUTPUT);
-  digitalWrite(SS, HIGH);
-  
-  // Check MAX3421E revision
-  Serial.println("🔍 Checking MAX3421E revision...");
-  Usb.Init(); // Initializes SPI
-  uint8_t revision = Usb.regRd(rREVISION);
-  Serial.print("📌 MAX3421E revision: 0x");
-  Serial.println(revision, HEX);
-  
-  if (revision == 0) {
-    Serial.println("❌ MAX3421E not responding - check connections!");
-    while(1); // Halt if no response
-  }
-  
-  // Initialize USB Host
-  Serial.println("📡 Initializing USB Host...");
-  if (Usb.Init() == -1) {
-    Serial.println("❌ USB Host Init Failed");
-    while(1);
-  }
-  Serial.println("✅ USB Host OK");
-  
-  // Print VID/PID we're looking for
-  Serial.print("🔍 Looking for device with VID: 0x");
-  Serial.print(CM_VID, HEX);
-  Serial.print(" PID: 0x");
-  Serial.println(CM_PID, HEX);
-  
-  // Register our device
-  Serial.println("📝 Registering CMControlPad device...");
-  uint8_t rcode = Usb.RegisterDeviceClass(&myPad);
-  if (rcode) {
-    Serial.print("❌ Failed to register CMControlPad device! Error code: 0x");
-    Serial.println(rcode, HEX);
-    while(1);
-  }
-  Serial.println("✅ CMControlPad device registered");
-  
-  laststate = 0;
+// Return true for the interface we want to hook into
+bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
+{
+    Serial.print("🔍 Interface ");
+    Serial.print(iface);
+    Serial.print(" Proto ");
+    Serial.println(proto);
+    
+    // Select Interface 0 (standard HID) and Interface 1 (control interface)
+    if (iface == 0 || iface == 1) {
+        return true;
+    }
+    
+    return false;
 }
 
-void loop() {
-  static unsigned long lastErrorTime = 0;
-  static int consecutiveErrors = 0;
-  static bool deviceFound = false;
-  static uint8_t foundMessages = 0;
-  
-  Usb.Task();
-  usbstate = Usb.getUsbTaskState();
-  
-  if (usbstate != laststate) {
-    laststate = usbstate;
+// Called when device is successfully initialized
+uint8_t HIDSelector::OnInitSuccessful() {
+    Serial.println("✅ HID device initialized successfully");
+    
+    // Call parent initialization first
+    uint8_t rcode = HIDComposite::OnInitSuccessful();
+    
+    // Now initialize Interface 1 for LED control
+    if (!interface1Initialized) {
+        Serial.println("🚀 Initializing Interface 1 for LED control...");
+        initializeInterface1();
+    }
+    
+    return rcode;
+}
+
+// Initialize Interface 1 with the CM Control Pad commands
+void HIDSelector::initializeInterface1() {
+    Serial.println("📤 Sending CM Control Pad initialization sequence...");
+    
+    if (sendInitializationSequence()) {
+        interface1Initialized = true;
+        Serial.println("✅ Interface 1 initialized successfully!");
+    } else {
+        Serial.println("❌ Interface 1 initialization failed");
+    }
+}
+
+// Send the initialization command sequence
+bool HIDSelector::sendInitializationSequence() {
+    uint8_t cmd[64] = {0};
     uint8_t rcode;
     
-    switch(usbstate) {
-      case USB_DETACHED_SUBSTATE_WAIT_FOR_DEVICE:
-        Serial.println("📡 Waiting for device...");
-        break;
-      case USB_ATTACHED_SUBSTATE_RESET_DEVICE:
-        Serial.println("📡 Device connected. Resetting...");
-        break;
-      case USB_ATTACHED_SUBSTATE_WAIT_SOF:
-        Serial.println("📡 Reset complete. Waiting for the first SOF...");
-        break;
-      case USB_ATTACHED_SUBSTATE_GET_DEVICE_DESCRIPTOR_SIZE:
-        Serial.println("📡 SOF generation started. Enumerating device...");
-        break;
-      case USB_STATE_ADDRESSING:
-        Serial.println("📡 Setting device address...");
-        break;
-      case USB_STATE_RUNNING:
-        Serial.println("📡 Device is running!");
-        // Read device descriptor
-        rcode = Usb.getDevDescr(1, 0, sizeof(USB_DEVICE_DESCRIPTOR), (uint8_t*)&devDesc);
-        if (rcode) {
-          Serial.print("❌ Error reading device descriptor. Error code: 0x");
-          Serial.println(rcode, HEX);
-        } else {
-          Serial.println("\n📋 Device Descriptor:");
-          Serial.print("  Vendor ID: 0x");
-          Serial.println(devDesc.idVendor, HEX);
-          Serial.print("  Product ID: 0x");
-          Serial.println(devDesc.idProduct, HEX);
-          Serial.print("  Device Class: 0x");
-          Serial.println(devDesc.bDeviceClass, HEX);
-          Serial.print("  Device Subclass: 0x");
-          Serial.println(devDesc.bDeviceSubClass, HEX);
-          Serial.print("  Device Protocol: 0x");
-          Serial.println(devDesc.bDeviceProtocol, HEX);
-          Serial.print("  Max Packet Size: ");
-          Serial.println(devDesc.bMaxPacketSize0);
-          
-          // Check if this is our device
-          if (devDesc.idVendor == CM_VID && devDesc.idProduct == CM_PID) {
-            Serial.println("🎯 Found matching CMControlPad device!");
-          } else {
-            Serial.println("⚠️ Device VID/PID doesn't match CMControlPad");
-          }
-        }
-        break;
-      case USB_STATE_ERROR:
-        Serial.println("❌ USB state machine reached error state");
-        break;
+    // Command 1: 42 00
+    Serial.println("📤 Step 1: Setup command 42 00");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x42; cmd[1] = 0x00;
+    cmd[4] = 0x01; cmd[7] = 0x01;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode) {
+        Serial.print("⚠️ Command 1 NAK/error: 0x");
+        Serial.println(rcode, HEX);
+        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
     }
-  }
-
-  static uint32_t lastCheck = 0;
-  if (millis() - lastCheck > 1000) {  // Print status every second
-    lastCheck = millis();
-    Serial.print("📊 Status - Address: 0x");
-    Serial.print(myPad.getAddress(), HEX);
-    Serial.print(" Initialized: ");
-    Serial.println(myPad.isInitialized() ? "Yes" : "No");
-  }
-
-  if (Usb.getUsbTaskState() == USB_STATE_RUNNING) {
-    if (!deviceFound) {
-      foundMessages++;
-      if (foundMessages <= 3) {
-        Serial.println("🎮 Found ControlPad, initializing...");
-      } else if (foundMessages == 4) {
-        Serial.println("🎮 ControlPad found (suppressing further messages)");
-      }
-      deviceFound = true;
-    }
-
-    if (myPad.isInitialized()) {
-      consecutiveErrors = 0;
-      // Only try transfers if we haven't seen too many errors and enough time has passed
-      if (consecutiveErrors < 3 && (millis() - lastTransferTime >= 10)) {
-    uint8_t buf[64];
-    uint16_t len = sizeof(buf);
-        const EpInfo* epInfo = myPad.getEpInfo();
-        
-        // Print endpoint info before transfer
-        Serial.print("📡 Attempting transfer on endpoint 0x");
-        Serial.print(epInfo[1].epAddr, HEX);
-        Serial.print(" (max packet size: ");
-        Serial.print(epInfo[1].maxPktSize);
-        Serial.println(")");
-        
-        // Try to read from the interrupt endpoint
-        uint8_t rcode = Usb.inTransfer(myPad.getAddress(), epInfo[1].epAddr, &len, buf);
-        lastTransferTime = millis();
-        
-    if (rcode == 0 && len > 0) {
-          // Reset error counter on successful transfer
-          consecutiveErrors = 0;
-      Serial.print("🔹 Pad Data: ");
-      for (uint8_t i = 0; i < len; i++) {
-        Serial.print(buf[i], HEX);
-        Serial.print(" ");
-      }
-      Serial.println();
-        } else if (rcode != 0) {
-          consecutiveErrors++;
-          if (consecutiveErrors >= 3) {
-            Serial.println("❌ Too many transfer errors, stopping transfer attempts");
-            // Reset error counter after a longer delay
-            if (millis() - lastErrorTime > 5000) {
-              consecutiveErrors = 0;
-              lastErrorTime = millis();
-              Serial.println("🔄 Resetting error counter, will try again");
-            }
-          } else {
-            Serial.print("❌ Transfer error: 0x");
-            Serial.print(rcode, HEX);
-            Serial.print(" (len: ");
-            Serial.print(len);
-            Serial.println(")");
-          }
-        }
-      }
-    } else {
-      // Track initialization errors with reduced frequency
-      unsigned long currentTime = millis();
-      if (currentTime - lastErrorTime > 5000) { // Only print error every 5 seconds
-        Serial.println("⚠️ Device not initialized");
-        lastErrorTime = currentTime;
-      }
-    }
-  } else {
-    deviceFound = false;
-    foundMessages = 0; // Reset counter when device is disconnected
+    delay(10);
     
-    // Only print USB state errors occasionally
-    unsigned long currentTime = millis();
-    if (currentTime - lastErrorTime > 10000) { // Only print every 10 seconds
-      Serial.print("🔌 USB State: ");
-      Serial.println(Usb.getUsbTaskState());
-      lastErrorTime = currentTime;
+    // Command 2: 42 10
+    Serial.println("📤 Step 2: Setup command 42 10");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x42; cmd[1] = 0x10;
+    cmd[4] = 0x01; cmd[7] = 0x01;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode) {
+        Serial.print("⚠️ Command 2 NAK/error: 0x");
+        Serial.println(rcode, HEX);
+        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
     }
-  }
+    delay(10);
+    
+    // Command 3: 43 00
+    Serial.println("📤 Step 3: Setup command 43 00");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x43; cmd[1] = 0x00;
+    cmd[4] = 0x01;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode) {
+        Serial.print("⚠️ Command 3 NAK/error: 0x");
+        Serial.println(rcode, HEX);
+        if (rcode != 0x4) return false; // Continue on NAK, fail on other errors
+    }
+    delay(15);
+    
+    // Command 4: 41 80 (status) - retry if fails (as shown in USB capture)
+    Serial.println("📤 Step 4: Status command 41 80");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x41; cmd[1] = 0x80;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode) {
+        Serial.print("⚠️ Status command NAK, retrying: 0x");
+        Serial.println(rcode, HEX);
+        delay(5);
+        // Retry as shown in USB capture
+        Serial.println("📤 Step 4 retry: Status command 41 80");
+        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+        if (rcode) {
+            Serial.print("⚠️ Status command retry NAK: 0x");
+            Serial.println(rcode, HEX);
+        }
+    }
+    delay(10);
+    
+    // Command 5: 52 00 (activate effects) - retry if fails (as shown in USB capture)
+    Serial.println("📤 Step 5: Activate effects 52 00");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x52; cmd[1] = 0x00;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode) {
+        Serial.print("⚠️ Effects command NAK, retrying: 0x");
+        Serial.println(rcode, HEX);
+        delay(5);
+        // Retry as shown in USB capture
+        Serial.println("📤 Step 5 retry: Activate effects 52 00");
+        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+        if (rcode) {
+            Serial.print("⚠️ Effects command retry NAK: 0x");
+            Serial.println(rcode, HEX);
+        }
+    }
+    delay(10);
+    
+    Serial.println("✅ Initialization sequence complete (device responding with echoes!)");
+    return true; // Success - we saw command echoes which means device is responding
+}
+
+// Will be called for all HID data received from the USB interface
+void HIDSelector::ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t len, uint8_t *buf) {
+    if (len && buf) {
+        Serial.print("📥 HID EP 0x");
+        Serial.print(ep, HEX);
+        Serial.print(" (");
+        Serial.print(len);
+        Serial.print(" bytes): ");
+        
+        for (uint8_t i = 0; i < len; i++) {
+            if (buf[i] < 0x10) Serial.print("0");
+            Serial.print(buf[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+        
+        // Parse button data for Interface 0
+        if (ep == 0x81 && len >= 4) {
+            uint8_t buttons1 = buf[0];
+            uint8_t buttons2 = buf[1];
+            
+            if (buttons1 != 0 || buttons2 != 0) {
+                Serial.print("🔴 Button pressed! ");
+                for (int i = 0; i < 8; i++) {
+                    if (buttons1 & (1 << i)) {
+                        Serial.print("Btn");
+                        Serial.print(i + 1);
+                        Serial.print(" ");
+                    }
+                }
+                for (int i = 0; i < 8; i++) {
+                    if (buttons2 & (1 << i)) {
+                        Serial.print("Btn");
+                        Serial.print(i + 9);
+                        Serial.print(" ");
+                    }
+                }
+                Serial.println();
+            }
+        }
+    }
+}
+
+USB Usb;
+//USBHub Hub(&Usb);
+HIDSelector hidSelector(&Usb);
+
+void setup()
+{
+    Serial.begin(115200);
+#if !defined(__MIPSEL__)
+    while (!Serial); // Wait for serial port to connect - used on Leonardo, Teensy and other boards with built-in USB CDC serial connection
+#endif
+    Serial.println("🚀 Starting CM Control Pad HID Composite Test");
+
+    if (Usb.Init() == -1)
+        Serial.println("❌ OSC did not start.");
+
+    // Set this to higher values to enable more debug information
+    // minimum 0x00, maximum 0xff, default 0x80
+    UsbDEBUGlvl = 0x80;  // Reduced debug level for cleaner output
+
+    delay(200);
+}
+
+void loop()
+{
+    Usb.Task();
+    
+    // Poll Interface 1 endpoint 0x83 for additional data
+    static unsigned long lastPoll = 0;
+    if (millis() - lastPoll > 50 && hidSelector.isReady()) { // Poll every 50ms
+        lastPoll = millis();
+        
+        uint8_t buf[64];
+        uint16_t len = 64;
+        uint8_t rcode = Usb.inTransfer(hidSelector.GetAddress(), 0x83, &len, buf);
+        
+        if (rcode == 0 && len > 0) {
+            Serial.print("📡 Interface 1 EP 0x83 (");
+            Serial.print(len);
+            Serial.print(" bytes): ");
+            for (uint8_t i = 0; i < len && i < 16; i++) {
+                if (buf[i] < 0x10) Serial.print("0");
+                Serial.print(buf[i], HEX);
+                Serial.print(" ");
+            }
+            if (len > 16) Serial.print("...");
+            Serial.println();
+        }
+    }
 }
