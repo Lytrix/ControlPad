@@ -237,7 +237,8 @@ void HIDSelector::ParseHIDData(USBHID *hid, uint8_t ep, bool is_rpt_id, uint8_t 
         Serial.print(len);
         Serial.print(" bytes): ");
         
-        for (uint8_t i = 0; i < len; i++) {
+        //for (uint8_t i = 0; i < len; i++) {
+            for (uint8_t i = 0; i < 8; i++) {
             if (buf[i] < 0x10) Serial.print("0");
           Serial.print(buf[i], HEX);
             Serial.print(" ");
@@ -426,7 +427,8 @@ void HIDSelector::testLEDCommands() {
     Serial.print("📤 Pkg1: rcode=0x");
     Serial.print(rcode, HEX);
     if (rcode == 0) {
-        Serial.print(" ✅ | ");
+        Serial.print(" ✅ → ");
+        // ACK received, proceed immediately to next command
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
@@ -442,10 +444,10 @@ void HIDSelector::testLEDCommands() {
             Serial.println("FAILED");
             return;
         }
-        Serial.print("recovered | ");
+        Serial.print("recovered → ");
     }
     
-    delayMicroseconds(100); // Small gap between commands for USB stability
+    // No delay - send next command immediately after ACK
     
     // Command 2: Package 2 - pre-built for speed
     memset(cmd, 0, 64);
@@ -476,16 +478,16 @@ void HIDSelector::testLEDCommands() {
             cmd[pos++] = color[0]; cmd[pos++] = color[1]; cmd[pos++] = color[2];
         }
     }
-    
-    // Send Package 2 with retry logic
-    Serial.print("📤 Sending Package 2... ");
+
+    // Send Package 2 immediately after Package 1 ACK
+    Serial.print("📤 Package 2... ");
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         Serial.print("rcode=0x");
         Serial.print(rcode, HEX);
         if (rcode == 0) {
-            Serial.println(" ✅");
-            break; // Success
+            Serial.print(" ✅ → ");
+            break; // ACK received, proceed immediately
         }
         Serial.print(" ❌");
         if (rcode != 0x4) {
@@ -497,7 +499,7 @@ void HIDSelector::testLEDCommands() {
         delayMicroseconds(50); // Brief delay before retry
     }
     if (rcode != 0) {
-        Serial.println("📤 Package 2 FAILED after retries");
+        Serial.println("FAILED after retries");
         return; // Failed after retries
     }
     
@@ -637,73 +639,44 @@ void loop()
     
     // Run RGB animation synchronized with SOF frames instead of millis()
     static bool sofSyncInitialized = false;
-    static unsigned long sofDebugTimer = 0;
     static uint16_t animationCount = 0;
     
     if (animationStarted && hidSelector.isReady()) {
-        // Comprehensive SOF debugging every 10 seconds (reduced frequency)
-        if (millis() - sofDebugTimer > 10000) {
-            uint8_t hirqReg = Usb.regRd(0x25);    // HIRQ register
-            uint8_t hienReg = Usb.regRd(0x26);    // HIEN register  
-            uint8_t modeReg = Usb.regRd(0x27);    // MODE register
-            uint8_t hctlReg = Usb.regRd(0x29);    // HCTL register
-            
-            Serial.print("🔍 SOF Debug at T+");
-            Serial.print(millis() - loopStartTime);
-            Serial.println("ms:");
-            Serial.print("   HIRQ: 0x");
-            Serial.print(hirqReg, HEX);
-            Serial.print(" (FRAMEIRQ: ");
-            Serial.print((hirqReg & 0x40) ? "SET" : "clear");
-            Serial.println(")");
-            Serial.print("   HIEN: 0x");
-            Serial.print(hienReg, HEX);
-            Serial.print(" (FRAMEIE: ");
-            Serial.print((hienReg & 0x40) ? "enabled" : "DISABLED");
-            Serial.println(")");
-            Serial.print("   MODE: 0x");
-            Serial.print(modeReg, HEX);
-            Serial.print(" (SOFKAENAB: ");
-            Serial.print((modeReg & 0x10) ? "ON" : "OFF");
-            Serial.print(", HOST: ");
-            Serial.print((modeReg & 0x01) ? "ON" : "OFF");
-            Serial.println(")");
-            Serial.print("   HCTL: 0x");
-            Serial.print(hctlReg, HEX);
-            Serial.println();
-            
-            // Always ensure SOF generation is enabled (library keeps disabling it)
-            if (!(modeReg & 0x10)) { // SOFKAENAB disabled
-                Usb.regWr(0x27, modeReg | 0x10); // Re-enable SOF generation
-            }
-            
-            // CRITICAL ROOT CAUSE FIX: Prevent HOST mode loss
-            if (!(modeReg & 0x01)) { // HOST bit disabled - this causes communication failure!
-                Serial.print("🚨 HOST mode lost! Restoring... MODE was 0x");
-                Serial.print(modeReg, HEX);
-                Usb.regWr(0x27, 0x11); // HOST=1, SOFKAENAB=1
-                Serial.println(" -> restored");
-            }
-            
-            // Re-enable FRAMEIRQ if disabled (reuse existing hienReg variable)
-            if (!(hienReg & 0x40)) { // FRAMEIE disabled
-                Usb.regWr(0x26, hienReg | 0x40); // Re-enable FRAMEIRQ
-            }
-            
-            sofDebugTimer = millis();
-        }
+
         
-        // Direct FNADDR polling approach - reliable SOF detection without FRAMEIRQ
+        // Periodic FNADDR polling approach - optimized for 1000Hz SOF timing
         static uint16_t lastFrameNum = 0;
         static uint16_t animationFrameInterval = 200; // Default 200 frames for 200ms
         static bool frameRateCalculated = false;
         static uint16_t startFrameNum = 0;
         static uint32_t startTime = 0;
+        static uint32_t lastFramePollTime = 0;
+        static uint16_t cachedFrameNum = 0;
         
-        // Read frame number directly from hardware (FNADDR register 0x0E)
-        uint16_t frameNum = Usb.regRd(0x0E); // rFNADDR
         uint32_t nowUs = micros();
         unsigned long nowMs = millis();
+        
+        // Periodic FNADDR polling - configurable interval for optimal performance
+        // Since SOF runs at 1000Hz (1ms), polling every 2-5ms allows early/late resync
+        static uint8_t framePollingInterval = 3; // ms - can be adjusted for timing requirements
+        uint16_t frameNum = cachedFrameNum;
+        
+                 if (nowMs - lastFramePollTime >= framePollingInterval || lastFramePollTime == 0) {
+             frameNum = Usb.regRd(0x0E); // rFNADDR - only read periodically
+             cachedFrameNum = frameNum;
+             lastFramePollTime = nowMs;
+             
+
+             
+             // Dynamic interval adjustment: reduce polling near critical timing points
+             static unsigned long lastAnimationTime = 0;
+             unsigned long timeSinceLastAnimation = nowMs - lastAnimationTime;
+             if (timeSinceLastAnimation > 180 && timeSinceLastAnimation < 220) {
+                 framePollingInterval = 1; // Increase precision near animation timing
+             } else {
+                 framePollingInterval = 3; // Normal polling rate
+             }
+         }
         
         // Initialize on first run
         if (!sofSyncInitialized) {
@@ -714,9 +687,11 @@ void loop()
             // Since logs show 1000Hz, start immediately with 200 frames = 200ms
             animationFrameInterval = 200;
             frameRateCalculated = true;
-            Serial.print("🎯 Direct FNADDR polling initialized! Starting frame: ");
+            Serial.print("🎯 Periodic FNADDR polling initialized! Starting frame: ");
             Serial.print(frameNum);
-            Serial.println(" - Using 200 frames for 200ms (1000Hz assumed)");
+            Serial.print(" - Polling every ");
+            Serial.print(framePollingInterval);
+            Serial.println("ms for 1000Hz SOF synchronization");
         }
         
         // SOF tick detected when frame number changes

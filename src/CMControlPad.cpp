@@ -195,7 +195,7 @@ void CMControlPad::setupDeviceSpecific() {
     epInfo[epDataOutIndex].epAddr = 0x04;
     epInfo[epDataOutIndex].maxPktSize = CM_PACKET_SIZE;
     epInfo[epDataOutIndex].epAttribs = USB_TRANSFER_TYPE_INTERRUPT;
-    epInfo[epDataOutIndex].bmNakPower = USB_NAK_NOWAIT;
+    epInfo[epDataOutIndex].bmNakPower = 4;  // Allow 2^4-1 = 15 NAKs before giving up (was USB_NAK_NOWAIT = 1 NAK)
     epInfo[epDataOutIndex].bmSndToggle = 0;
     epInfo[epDataOutIndex].bmRcvToggle = 0;
     
