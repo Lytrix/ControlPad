@@ -687,9 +687,9 @@ void HIDSelector::testLEDCommands() {
         Serial.print(activationDuration);
         Serial.print("μs)");
         if (rcode == 0) {
-            // CRITICAL: Ensure Activation command always takes ~225μs total
+            // CRITICAL: Ensure Activation command always takes ~250μs total (increased buffer)
             // Device expects consistent timing for stable LED operation
-            const unsigned long TARGET_ACTIVATION_TIME = 225; // μs
+            const unsigned long TARGET_ACTIVATION_TIME = 250; // μs (was 225μs)
             if (activationDuration < TARGET_ACTIVATION_TIME) {
                 unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
                 delayMicroseconds(compensationDelay);
@@ -700,6 +700,36 @@ void HIDSelector::testLEDCommands() {
                 Serial.print("μs");
             }
             Serial.println(" ✅");
+            
+            // === PREDICTIVE TIMING RESET ===
+            // Check if activation timing is creeping toward ceiling - reset buffers proactively
+            static unsigned long lastTimingReset = 0;
+            if (activationDuration > 230 && debugCounter > lastTimingReset + 20) { // Give 20μs buffer before 250μs ceiling
+                lastTimingReset = debugCounter;
+                
+                Serial.print("⚠️  Timing creep detected (");
+                Serial.print(activationDuration);
+                Serial.print("μs approaching 250μs ceiling) - Proactive USB buffer reset... ");
+                
+                // Send USB buffer reset sequence
+                uint8_t resetCmd[64] = {0};
+                resetCmd[0] = 0x41;  // Status query command
+                resetCmd[1] = 0x80;  // Basic status - this should reset internal buffers
+                
+                delayMicroseconds(200); // Small gap after LED sequence
+                uint8_t resetRcode = pUsb->outTransfer(bAddress, 0x04, 64, resetCmd);
+                Serial.print("rcode=0x");
+                Serial.print(resetRcode, HEX);
+                if (resetRcode == 0) {
+                    Serial.println(" ✅ Buffer reset successful");
+                } else {
+                    Serial.print(" ❌ Reset failed (");
+                    Serial.print(resetRcode, HEX);
+                    Serial.println(")");
+                }
+                delayMicroseconds(500); // Allow device time to process reset
+            }
+            
             break;
         }
         Serial.print(" ❌");
