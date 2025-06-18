@@ -30,6 +30,7 @@ public:
     void resetFrameCounter(); // Reset USB frame counter to prevent wraparound issues
     void checkUSBSpeed(); // Check and optimize USB speed settings
     void optimizeNAKSettings(); // Optimize NAK tolerance for long-term stability
+
     
     // MAX3421E timing synchronization methods
 
@@ -362,6 +363,22 @@ void HIDSelector::testLEDCommands() {
     static unsigned long debugCounter = 0;
     debugCounter++;
     
+    // === PRECISE TIMING MEASUREMENT ===
+    static unsigned long lastCommandTime = 0;
+    static unsigned long baselineInterval = 0;
+    static unsigned long maxDrift = 0;
+    static unsigned long minDrift = 4294967295UL; // Max value for unsigned long
+    
+    unsigned long commandStartTime = micros();
+    unsigned long intervalSinceLastCommand = (lastCommandTime > 0) ? (commandStartTime - lastCommandTime) : 0;
+    
+    // === TIMING DRIFT COMPENSATION DISABLED ===
+    // Drift compensation was causing 20-second periodic issues - removed for stability
+    // static uint8_t driftCompensationCounter = 0;
+    // driftCompensationCounter++;
+    // bool applyDriftCompensation = (driftCompensationCounter % 8 == 0);
+    bool applyDriftCompensation = false;
+    
     Serial.print("🔍 LED command #");
     Serial.print(debugCounter);
     Serial.print(" starting... ");
@@ -485,16 +502,51 @@ void HIDSelector::testLEDCommands() {
     uint8_t package1Backup[64];
     memcpy(package1Backup, cmd, 64);
     
-    // === SIMPLIFIED TIMING FOR PACKAGE 1 ===
-    //delayMicroseconds(100);
+    // === NO PRE-COMMAND DELAYS ===
+    // Removed all pre-command delays to eliminate artificial timing interference
+    
+    // Track timing drift and establish baseline
+    if (debugCounter == 2) { // Set baseline on second command (first interval)
+        baselineInterval = intervalSinceLastCommand;
+        Serial.print("📐 Baseline interval: ");
+        Serial.print(baselineInterval);
+        Serial.println("μs");
+    } else if (debugCounter > 2) {
+        long drift = (long)intervalSinceLastCommand - (long)baselineInterval;
+        if (abs(drift) > maxDrift) maxDrift = abs(drift);
+        if (abs(drift) < minDrift) minDrift = abs(drift);
+        
+        // Report significant drift every 50 commands
+        if (debugCounter % 50 == 0) {
+            Serial.print("📊 Timing stats #");
+            Serial.print(debugCounter);
+            Serial.print(": interval=");
+            Serial.print(intervalSinceLastCommand);
+            Serial.print("μs, drift=");
+            Serial.print(drift);
+            Serial.print("μs, max_drift=±");
+            Serial.print(maxDrift);
+            Serial.print("μs, min_drift=");
+            Serial.print(minDrift);
+            Serial.println("μs");
+        }
+    }
+    
+    unsigned long pkg1StartTime = micros();
     
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    unsigned long pkg1EndTime = micros();
+    unsigned long pkg1Duration = pkg1EndTime - pkg1StartTime;
+    
     Serial.print("📤 Pkg1: rcode=0x");
     Serial.print(rcode, HEX);
+    Serial.print(" (");
+    Serial.print(pkg1Duration);
+    Serial.print("μs)");
     if (rcode == 0) {
         Serial.print(" ✅ → ");
-       // delayMicroseconds(400);
+       delayMicroseconds(500);
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
@@ -559,18 +611,29 @@ void HIDSelector::testLEDCommands() {
     const uint8_t *color23 = (movingLED == 23) ? (const uint8_t[]){0xFF, 0xFF, 0xFF} : rainbowColors[buttonMap[23]];
     *rgbPtr++ = color23[0]; *rgbPtr++ = color23[1]; *rgbPtr++ = color23[2];
 
-    // === SIMPLIFIED TIMING FOR PACKAGE 2 ===
-    delayMicroseconds(100);
+    // === NO PRE-COMMAND DELAYS ===
+    // Removed all pre-command delays to eliminate artificial timing interference
 
+    unsigned long pkg2StartTime = micros();
+    unsigned long pkg1ToPkg2Gap = pkg2StartTime - pkg1EndTime;
+    
     // Send Package 2 with proper timing
-    Serial.print("📤 Package 2... ");
+    Serial.print("📤 Package 2 (gap:");
+    Serial.print(pkg1ToPkg2Gap);
+    Serial.print("μs)... ");
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+        unsigned long pkg2EndTime = micros();
+        unsigned long pkg2Duration = pkg2EndTime - pkg2StartTime;
+        
         Serial.print("rcode=0x");
         Serial.print(rcode, HEX);
+        Serial.print(" (");
+        Serial.print(pkg2Duration);
+        Serial.print("μs)");
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(400);
+            delayMicroseconds(500);
             break;
         }
         Serial.print(" ❌");
@@ -603,15 +666,39 @@ void HIDSelector::testLEDCommands() {
     // === ACTIVATION: PRE-BUILT COMMAND - INSTANT COPY ===
     memcpy(cmd, activationCmd, 64);  // Ultra-fast - no dynamic creation needed
     
-    delayMicroseconds(100);
+    // === NO PRE-COMMAND DELAYS ===
+    // Removed all pre-command delays to eliminate artificial timing interference
+    
+    unsigned long activationStartTime = micros();
+    unsigned long pkg2ToActivationGap = activationStartTime - pkg2StartTime; // This includes the 500μs delay
     
     // Send activation with conservative timing
-    Serial.print("📤 Sending Activation command... ");
+    Serial.print("📤 Activation (gap:");
+    Serial.print(pkg2ToActivationGap);
+    Serial.print("μs)... ");
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+        unsigned long activationEndTime = micros();
+        unsigned long activationDuration = activationEndTime - activationStartTime;
+        
         Serial.print("rcode=0x");
         Serial.print(rcode, HEX);
+        Serial.print(" (");
+        Serial.print(activationDuration);
+        Serial.print("μs)");
         if (rcode == 0) {
+            // CRITICAL: Ensure Activation command always takes ~225μs total
+            // Device expects consistent timing for stable LED operation
+            const unsigned long TARGET_ACTIVATION_TIME = 225; // μs
+            if (activationDuration < TARGET_ACTIVATION_TIME) {
+                unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
+                delayMicroseconds(compensationDelay);
+                Serial.print(" +");
+                Serial.print(compensationDelay);
+                Serial.print("μs=");
+                Serial.print(TARGET_ACTIVATION_TIME);
+                Serial.print("μs");
+            }
             Serial.println(" ✅");
             break;
         }
@@ -641,6 +728,41 @@ void HIDSelector::testLEDCommands() {
             Serial.println("Pkg1 resend failed, aborting");
             return;
         }
+    }
+    
+    // Update timing tracking for next iteration
+    lastCommandTime = commandStartTime;
+    
+    // === PERIODIC DEVICE REFRESH ===
+    // Send a device refresh command every 50 LED updates (~5 seconds) to prevent
+    // long-term timing drift and buffer accumulation in the device
+    static unsigned long lastRefreshCommand = 0;
+    if (debugCounter > 0 && debugCounter % 50 == 0 && debugCounter != lastRefreshCommand) {
+        lastRefreshCommand = debugCounter;
+        
+        Serial.print("🔄 Device refresh #");
+        Serial.print(debugCounter / 50);
+        Serial.print(" at command ");
+        Serial.print(debugCounter);
+        Serial.print("... ");
+        
+        // Send a minimal status query command to refresh device timing
+        uint8_t refreshCmd[64] = {0};
+        refreshCmd[0] = 0x41;  // Status query command
+        refreshCmd[1] = 0x80;  // Basic status
+        
+        delayMicroseconds(100); // Small gap after LED sequence
+        rcode = pUsb->outTransfer(bAddress, 0x04, 64, refreshCmd);
+        Serial.print("rcode=0x");
+        Serial.print(rcode, HEX);
+        if (rcode == 0) {
+            Serial.println(" ✅");
+        } else {
+            Serial.print(" ❌ (");
+            Serial.print(rcode, HEX);
+            Serial.println(")");
+        }
+        delayMicroseconds(200); // Brief recovery time
     }
     
     // Move to next LED position
@@ -839,6 +961,8 @@ void HIDSelector::optimizeNAKSettings() {
     Serial.println("   • Should significantly improve 1-2 minute stability");
 }
 
+
+
 USB Usb;
 //USBHub Hub(&Usb);
 HIDSelector hidSelector(&Usb);
@@ -947,7 +1071,8 @@ void loop()
             Serial.print(animationCount);
             Serial.print(" at T+");
             Serial.print(nowMs - loopStartTime);
-            Serial.println("ms");
+            Serial.print("ms");
+            Serial.println();
             
             // Disabled USB health check - it was causing flickering at 13 seconds
             // Health checks seem to interfere with device stability
