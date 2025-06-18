@@ -176,7 +176,7 @@ bool HIDSelector::sendInitializationSequence() {
     Serial.println("📤 Step 4: Status command 41 80");
     memset(cmd, 0, 64);
     cmd[0] = 0x41; cmd[1] = 0x80;
-    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    //rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     delay(20);
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     if (rcode == 0) Serial.println("✅ Command 4 retry successful!");
@@ -186,7 +186,7 @@ bool HIDSelector::sendInitializationSequence() {
     Serial.println("📤 Step 5: Activate effects 52 00");
     memset(cmd, 0, 64);
     cmd[0] = 0x52; cmd[1] = 0x00;
-    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    //rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     delay(20);
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     if (rcode == 0) Serial.println("✅ Command 5 retry successful!");
@@ -194,6 +194,183 @@ bool HIDSelector::sendInitializationSequence() {
     
     // Final check for all responses
     checkForResponses();
+    
+    // === 56 14 INITIALIZATION SEQUENCE ===
+    // Based on USB capture analysis - device needs 56 14 setup commands FIRST
+    // Send commands in groups of 3 to work around the 3-command limit
+    Serial.println("🔧 Sending 56 14 initialization sequence (0x00-0x0D) in groups of 3...");
+    
+    // Send 56 14 commands in groups of 3 with proper data patterns
+    for (uint8_t group = 0; group < 5; group++) { // 5 groups: 0-2, 3-5, 6-8, 9-B, C-D
+        uint8_t startCmd = group * 3;
+        uint8_t endCmd = (group == 4) ? 0x0D : startCmd + 2; // Last group only has 2 commands
+        
+        Serial.print("📤 Group ");
+        Serial.print(group + 1);
+        Serial.print(": Commands 0x");
+        Serial.print(startCmd, HEX);
+        Serial.print("-0x");
+        Serial.print(endCmd, HEX);
+        Serial.println("...");
+        
+        // Send each command in this group
+        for (uint8_t subCmd = startCmd; subCmd <= endCmd; subCmd++) {
+            Serial.print("  📤 56 14 ");
+            Serial.print(subCmd, HEX);
+            Serial.print("... ");
+            
+            memset(cmd, 0, 64);
+            cmd[0] = 0x56; 
+            cmd[1] = 0x14; 
+            cmd[2] = subCmd;
+            
+            // Add specific data patterns based on USB capture
+            switch (subCmd) {
+                case 0x00: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x04; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x01: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x0A; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x02: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x16; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x03: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x22; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x04: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x3F; cmd[6] = 0x00; cmd[7] = 0xBB; cmd[8] = 0xBB; cmd[9] = 0xBB; cmd[10] = 0xBB; break;
+                case 0x05: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x4A; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x06: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x57; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x07: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x5F; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x08: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x65; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x09: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x6E; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x0A: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x77; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x0B: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x7E; cmd[6] = 0x00; cmd[7] = 0x55; cmd[8] = 0x55; cmd[9] = 0x55; cmd[10] = 0x55; break;
+                case 0x0C: cmd[3] = 0x02; cmd[4] = 0x00; cmd[5] = 0x88; cmd[6] = 0x00; cmd[7] = 0x00; cmd[8] = 0x00; cmd[9] = 0x00; cmd[10] = 0x00; break;
+                case 0x0D: cmd[3] = 0x01; cmd[4] = 0x00; cmd[5] = 0x8D; cmd[6] = 0x00; cmd[7] = 0xAA; cmd[8] = 0xAA; cmd[9] = 0xAA; cmd[10] = 0xAA; break;
+            }
+            
+            rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+            if (rcode == 0) {
+                Serial.println("✅");
+                delay(8); // Wait ~8ms between commands (matching USB capture timing)
+            } else {
+                if (rcode == 0x4) {
+                    // Retry with longer delays
+                    for (int i = 0; i < 3; i++) {
+                        delay(15);
+                        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+                        if (rcode == 0) {
+                            Serial.println("✅ (retry)");
+                            delay(8);
+                            break;
+                        }
+                    }
+                }
+                if (rcode != 0) {
+                    Serial.print("❌ (0x");
+                    Serial.print(rcode, HEX);
+                    Serial.println(")");
+                }
+            }
+        }
+        
+        // Wait for device responses after each group (like USB capture)
+        Serial.print("  ⏳ Waiting for device responses after group ");
+        Serial.print(group + 1);
+        Serial.println("...");
+        delay(50); // Wait for device to process the group
+        
+        // Clear any pending responses
+        for (int i = 0; i < 5; i++) {
+            uint8_t response[64];
+            uint16_t responseLen = 64;
+            pUsb->inTransfer(bAddress, 0x3, &responseLen, response);
+            delay(2);
+        }
+    }
+    
+    Serial.println("✅ 56 14 initialization sequence complete");
+    delay(100); // Longer delay between sequences
+    
+    // === 56 20 INITIALIZATION SEQUENCE ===
+    // Send 56 20 commands in groups of 3 to work around the 3-command limit
+    Serial.println("🔧 Sending 56 20 initialization sequence (0x00-0x0A) in groups of 3...");
+    
+    // Send 56 20 commands in groups of 3
+    for (uint8_t group = 0; group < 4; group++) { // 4 groups: 0-2, 3-5, 6-8, 9-A
+        uint8_t startCmd = group * 3;
+        uint8_t endCmd = (group == 3) ? 0x0A : startCmd + 2; // Last group only has 2 commands
+        
+        Serial.print("📤 Group ");
+        Serial.print(group + 1);
+        Serial.print(": Commands 0x");
+        Serial.print(startCmd, HEX);
+        Serial.print("-0x");
+        Serial.print(endCmd, HEX);
+        Serial.println("...");
+        
+        // Send each command in this group
+        for (uint8_t subCmd = startCmd; subCmd <= endCmd; subCmd++) {
+            Serial.print("  📤 56 20 ");
+            Serial.print(subCmd, HEX);
+            Serial.print("... ");
+            
+            memset(cmd, 0, 64);
+            cmd[0] = 0x56; 
+            cmd[1] = 0x20; 
+            cmd[2] = subCmd;
+            
+            rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+            if (rcode == 0) {
+                Serial.println("✅");
+                delay(8); // Wait ~8ms between commands (matching USB capture timing)
+            } else {
+                if (rcode == 0x4) {
+                    // Retry with longer delays
+                    for (int i = 0; i < 3; i++) {
+                        delay(15);
+                        rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+                        if (rcode == 0) {
+                            Serial.println("✅ (retry)");
+                            delay(8);
+                            break;
+                        }
+                    }
+                }
+                if (rcode != 0) {
+                    Serial.print("❌ (0x");
+                    Serial.print(rcode, HEX);
+                    Serial.println(")");
+                }
+            }
+        }
+        
+        // Wait for device responses after each group
+        Serial.print("  ⏳ Waiting for device responses after group ");
+        Serial.print(group + 1);
+        Serial.println("...");
+        delay(50); // Wait for device to process the group
+        
+        // Clear any pending responses
+        for (int i = 0; i < 5; i++) {
+            uint8_t response[64];
+            uint16_t responseLen = 64;
+            pUsb->inTransfer(bAddress, 0x3, &responseLen, response);
+            delay(2);
+        }
+    }
+    
+    Serial.println("✅ 56 20 initialization sequence complete");
+    delay(100); // Longer delay between sequences
+    
+    // Status check after 56 20 sequence (from USB capture)
+    Serial.println("📤 Status check 41 80 after 56 20 sequence");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x41; cmd[1] = 0x80;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode == 0) Serial.println("✅ Status check successful!");
+    delay(20);
+    
+    // 52 28 command after status check (from USB capture)
+    Serial.println("📤 52 28 command after status check");
+    memset(cmd, 0, 64);
+    cmd[0] = 0x52; cmd[1] = 0x28;
+    rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
+    if (rcode == 0) Serial.println("✅ 52 28 command successful!");
+    delay(20);
     
     // Command 6: Set custom mode (56 81) - Run once during initialization
     Serial.println("📤 Step 6: Set custom mode (56 81)");
