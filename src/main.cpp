@@ -876,6 +876,9 @@ void HIDSelector::testLEDCommands() {
     
     
     // === PERIODIC DEVICE REFRESH ===
+    // DISABLED: Device refresh was causing flickering at 12 and 36 seconds
+    // The refresh commands were failing (rcode=0x4) and interfering with LED timing
+    /*
     // Send a device refresh command every 50 LED updates (~3 seconds) to prevent
     // long-term timing drift and buffer accumulation in the device
     static unsigned long lastRefreshCommand = 0;
@@ -906,6 +909,7 @@ void HIDSelector::testLEDCommands() {
         }
         delayMicroseconds(200); // Brief recovery time
     }
+    */
     
     // Move to next LED position
     movingLED = (movingLED + 1) % 24;
@@ -928,15 +932,6 @@ void HIDSelector::testLEDCommands() {
         Serial.print(compensationDelay / 1000);
         Serial.println("ms");
         delayMicroseconds(compensationDelay);
-    }
-    
-    // Add a very small random jitter (1-2ms) every 20 cycles
-    if (debugCounter > 0 && debugCounter % 20 == 0) {
-        unsigned long jitter = random(1, 3) * 1000; // 1-2ms in microseconds
-        Serial.print("✨ Jitter: +");
-        Serial.print(jitter / 1000);
-        Serial.println("ms");
-        delayMicroseconds(jitter);
     }
 }
 
@@ -972,9 +967,9 @@ void HIDSelector::waitForUSBFrameSync() {
     Serial.print("μs)");
     
     // CRITICAL: Ensure minimum spacing between commands to prevent flickering
-    // If SOF sync was too fast (< 500μs), add delay to prevent buffer overflow
-    if (syncDuration < 500) {
-        unsigned long compensationDelay = 500 - syncDuration;
+    // If SOF sync was too fast (< 100μs), add delay to prevent buffer overflow
+    if (syncDuration < 100) {
+        unsigned long compensationDelay = 100 - syncDuration;
         Serial.print(" +");
         Serial.print(compensationDelay);
         Serial.print("μs compensation");
