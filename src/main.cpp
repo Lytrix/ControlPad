@@ -12,6 +12,12 @@ class HIDSelector : public HIDComposite
 {
 private:
     bool interface1Initialized = false;
+    
+    // NAK rate monitoring
+    static int nakCount;
+    static int totalCommands;
+    static unsigned long lastNakReport;
+    static bool hadNAK; // Track NAK state for smoothing
    
 public:
     HIDSelector(USB *p) : HIDComposite(p) {};
@@ -39,6 +45,12 @@ protected:
     bool SelectInterface(uint8_t iface, uint8_t proto);
     uint8_t OnInitSuccessful(); // Override to add our initialization
 };
+
+// Define static member variables
+int HIDSelector::nakCount = 0;
+int HIDSelector::totalCommands = 0;
+unsigned long HIDSelector::lastNakReport = 0;
+bool HIDSelector::hadNAK = false;
 
 // Return true for the interface we want to hook into
 bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
@@ -534,6 +546,16 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
 
 // Test LED command sequence with moving LED on rainbow background - OPTIMIZED FRAME CREATION
 void HIDSelector::testLEDCommands() {
+    // === NAK RATE MONITORING ===
+    // Initialize static variables if needed
+    if (totalCommands == 0) {
+        nakCount = 0;
+        totalCommands = 0;
+        lastNakReport = 0;
+    }
+    
+    totalCommands++;
+    
     static uint8_t movingLED = 0; // Which LED is currently bright (0-23)
     uint8_t cmd[64];
     uint8_t rcode;
@@ -684,11 +706,11 @@ void HIDSelector::testLEDCommands() {
     Serial.print("μs)");
     if (rcode == 0) {
         Serial.print(" ✅ → ");
-        delayMicroseconds(256); // Reduced from 200μs to prevent timing issues
+        delayMicroseconds(250); // Reduced from 200μs to prevent timing issues
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
-            delayMicroseconds(256); // Reduced delay
+            delayMicroseconds(250); // Reduced delay
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             Serial.print("retry=0x");
             Serial.print(rcode, HEX);
@@ -775,7 +797,7 @@ void HIDSelector::testLEDCommands() {
         Serial.print("μs)");
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(256); // Reduced from 500μs to prevent timing issues
+            delayMicroseconds(350); // Reduced from 500μs to prevent timing issues
             break;
         }
         Serial.print(" ❌");
@@ -785,6 +807,8 @@ void HIDSelector::testLEDCommands() {
             return;
         }
         Serial.print(" (NAK, retry)");
+        nakCount++; // Track NAK for rate monitoring
+        hadNAK = true; // Flag for NAK smoothing
         delayMicroseconds(200);
     }
     if (rcode != 0) {
@@ -822,7 +846,7 @@ void HIDSelector::testLEDCommands() {
     Serial.print("📤 Activation (gap:");
     Serial.print(pkg2ToActivationGap);
     Serial.print("μs)... ");
-    for (int retry = 0; retry < 3; retry++) {
+    for (int retry = 0; retry < 5; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         unsigned long activationEndTime = micros();
         unsigned long activationDuration = activationEndTime - activationStartTime;
@@ -835,7 +859,7 @@ void HIDSelector::testLEDCommands() {
         if (rcode == 0) {
             // CRITICAL: Use minimal timing compensation to prevent >1000μs transfers
             // Device expects consistent timing for stable LED operation
-            const unsigned long TARGET_ACTIVATION_TIME = 150; // μs (reduced from 250μs)
+            const unsigned long TARGET_ACTIVATION_TIME = 180; // μs (reduced from 250μs)
             if (activationDuration < TARGET_ACTIVATION_TIME) {
                 unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
                 delayMicroseconds(compensationDelay);
@@ -856,7 +880,9 @@ void HIDSelector::testLEDCommands() {
             return;
         }
         Serial.print(" (NAK, retry)");
-        delayMicroseconds(200);
+        nakCount++; // Track NAK for rate monitoring
+        hadNAK = true; // Flag for NAK smoothing
+        delayMicroseconds(50); // Reduced from 150μs to minimize timing disruption
     }
     
     if (rcode != 0) {
@@ -879,40 +905,35 @@ void HIDSelector::testLEDCommands() {
     
     
     // === PERIODIC DEVICE REFRESH ===
-    // DISABLED: Device refresh was causing flickering at 12 and 36 seconds
-    // The refresh commands were failing (rcode=0x4) and interfering with LED timing
-    /*
-    // Send a device refresh command every 50 LED updates (~3 seconds) to prevent
-    // long-term timing drift and buffer accumulation in the device
-    static unsigned long lastRefreshCommand = 0;
-    if (debugCounter > 0 && debugCounter % 30 == 0 && debugCounter != lastRefreshCommand) {
-        lastRefreshCommand = debugCounter;
+    // Proactive device refresh every 500 commands (~8 minutes) to prevent late-phase degradation
+    static unsigned long lastProactiveRefresh = 0;
+    if (totalCommands % 500 == 0 && totalCommands != lastProactiveRefresh) {
+        lastProactiveRefresh = totalCommands;
         
-        Serial.print("🔄 Device refresh #");
-        Serial.print(debugCounter / 30);
-        Serial.print(" at command ");
-        Serial.print(debugCounter);
-        Serial.print("... ");
+        Serial.print("🔄 Proactive device refresh at command #");
+        Serial.print(totalCommands);
+        Serial.print(" (~");
+        Serial.print(totalCommands / 10);
+        Serial.println(" seconds of operation)...");
         
-        // Send a minimal status query command to refresh device timing
+        // Send a minimal status query to refresh device state
         uint8_t refreshCmd[64] = {0};
         refreshCmd[0] = 0x41;  // Status query command
         refreshCmd[1] = 0x80;  // Basic status
         
-        delayMicroseconds(100); // Small gap after LED sequence
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, refreshCmd);
-        Serial.print("rcode=0x");
-        Serial.print(rcode, HEX);
+        delayMicroseconds(500); // Brief pause before refresh
+        uint8_t rcode = pUsb->outTransfer(bAddress, 0x04, 64, refreshCmd);
+        
         if (rcode == 0) {
-            Serial.println(" ✅");
-            } else {
-            Serial.print(" ❌ (");
+            Serial.println("✅ Proactive refresh successful");
+        } else {
+            Serial.print("❌ Proactive refresh failed (rcode=0x");
             Serial.print(rcode, HEX);
             Serial.println(")");
         }
-        delayMicroseconds(200); // Brief recovery time
+        
+        delayMicroseconds(500); // Recovery time after refresh
     }
-    */
     
     // Move to next LED position
     movingLED = (movingLED + 1) % 24;
@@ -927,14 +948,103 @@ void HIDSelector::testLEDCommands() {
     // This prevents timing from compounding and doubling the effective speed
     lastCycleTime = currentTime;
     
-    // Ensure minimum 100ms between LED command cycles to prevent flickering
-    const unsigned long MIN_CYCLE_TIME = 100000; // 100ms in microseconds
+    // Ensure minimum 50ms between LED command cycles to prevent flickering
+    const unsigned long MIN_CYCLE_TIME = 50000; // 50ms in microseconds (reduced from 100ms)
     if (cycleDuration < MIN_CYCLE_TIME) {
         unsigned long compensationDelay = MIN_CYCLE_TIME - cycleDuration;
         Serial.print("⏰ Cycle timing compensation: +");
         Serial.print(compensationDelay / 1000);
         Serial.println("ms");
         delayMicroseconds(compensationDelay);
+    }
+    
+    // === NAK RATE MONITORING ===
+    // Track NAKs and report rate every 100 commands
+    if (totalCommands % 100 == 0) {
+        unsigned long now = millis();
+        float nakRate = (float)nakCount / 100.0 * 100.0; // Percentage
+        Serial.print("📊 NAK Rate: ");
+        Serial.print(nakRate, 1);
+        Serial.print("% (");
+        Serial.print(nakCount);
+        Serial.print("/100 commands)");
+        
+        // Warning if NAK rate is high
+        if (nakRate > 10.0) {
+            Serial.print(" ⚠️ HIGH NAK RATE - system may be degrading");
+            // Proactive device refresh for high NAK rates
+            Serial.print(" 🔄 Triggering proactive device refresh...");
+            resetDevice();
+        } else if (nakRate > 5.0) {
+            Serial.print(" ⚠️ Elevated NAK rate");
+            // Light buffer clearing for elevated NAK rates
+            Serial.print(" 🧹 Clearing device buffers...");
+            delayMicroseconds(1000); // Brief pause to clear buffers
+        } else {
+            Serial.print(" ✅ Normal operation");
+        }
+        Serial.println();
+        
+        // Reset counters
+        nakCount = 0;
+        lastNakReport = now;
+    }
+    
+    // === NAK SMOOTHING ===
+    // If we had a NAK in the previous command, hold the LED state briefly
+    // to prevent visible flickering during NAK recovery
+    if (hadNAK) {
+        delayMicroseconds(100); // Brief hold to smooth NAK recovery
+        hadNAK = false;
+    }
+    
+    // === NAK RATE MONITORING ===
+    totalCommands++;
+    
+    // === NAK PATTERN DETECTION ===
+    // Detect when NAKs are occurring in regular patterns (indicating system degradation)
+    static int recentNAKs[10] = {0}; // Track last 10 NAK positions
+    static int nakIndex = 0;
+    static bool patternDetected = false;
+    
+    // Update NAK history when NAK occurs
+    if (nakCount > 0) {
+        recentNAKs[nakIndex] = totalCommands;
+        nakIndex = (nakIndex + 1) % 10;
+        
+        // Check for regular NAK patterns (every 3-7 commands)
+        if (nakIndex == 0) { // Full buffer, check for patterns
+            int intervals[9];
+            for (int i = 0; i < 9; i++) {
+                intervals[i] = recentNAKs[(i + 1) % 10] - recentNAKs[i];
+            }
+            
+            // Check if intervals are consistent (within ±2 commands)
+            bool consistentPattern = true;
+            int baseInterval = intervals[0];
+            for (int i = 1; i < 9; i++) {
+                if (abs(intervals[i] - baseInterval) > 2) {
+                    consistentPattern = false;
+                    break;
+                }
+            }
+            
+            if (consistentPattern && baseInterval >= 3 && baseInterval <= 7 && !patternDetected) {
+                patternDetected = true;
+                Serial.print("⚠️ NAK PATTERN DETECTED: NAKs every ~");
+                Serial.print(baseInterval);
+                Serial.println(" commands - triggering early intervention");
+                
+                // Trigger immediate device refresh for pattern detection
+                resetDevice();
+                delayMicroseconds(1000); // Extended recovery time
+            }
+        }
+    } else {
+        // Reset pattern detection if no NAKs in recent history
+        if (totalCommands % 50 == 0) {
+            patternDetected = false;
+        }
     }
 }
 
@@ -1167,8 +1277,8 @@ void HIDSelector::checkUSBSpeed() {
     // Check SPI speed settings
     Serial.println("🔍 SPI speed configuration:");
     Serial.println("   MAX3421E can handle up to 26MHz SPI");
-    Serial.println("   USB Host Shield library typically uses 12-21MHz");
-    Serial.println("   Current: Optimized for Teensy 4.0 performance");
+    Serial.println("   USB Host Shield library configured for 24MHz SPI");
+    Serial.println("   Current: Optimized 24MHz for Teensy 4.0 + MAX3421E stability");
 }
 
 void HIDSelector::optimizeNAKSettings() {
