@@ -668,8 +668,9 @@ void HIDSelector::testLEDCommands() {
     
     unsigned long pkg1StartTime = micros();
     
-    // Wait for USB frame boundary before sending Package 1
-    waitForUSBFrameSync();
+    // CRITICAL: Don't use SOF sync for Package 1 - it causes >1000μs transfer times
+    // Package 1 should be sent immediately for stable LED operation
+    // waitForUSBFrameSync(); // REMOVED - causes Package 1 to take too long
     
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
@@ -683,11 +684,11 @@ void HIDSelector::testLEDCommands() {
     Serial.print("μs)");
     if (rcode == 0) {
         Serial.print(" ✅ → ");
-       delayMicroseconds(500);
+        delayMicroseconds(256); // Reduced from 200μs to prevent timing issues
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
-            delayMicroseconds(200);
+            delayMicroseconds(256); // Reduced delay
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             Serial.print("retry=0x");
             Serial.print(rcode, HEX);
@@ -700,7 +701,7 @@ void HIDSelector::testLEDCommands() {
             return;
         }
         Serial.print("recovered → ");
-        delayMicroseconds(300);
+        delayMicroseconds(200); // Reduced delay
     }
     
     // === PACKAGE 2: ULTRA-FAST CREATION ===
@@ -754,8 +755,9 @@ void HIDSelector::testLEDCommands() {
     unsigned long pkg2StartTime = micros();
     unsigned long pkg1ToPkg2Gap = pkg2StartTime - pkg1EndTime;
     
-    // Wait for USB frame boundary before sending Package 2
-    waitForUSBFrameSync();
+    // CRITICAL: Don't use SOF sync for Package 2 - it causes timing issues
+    // Package 2 should be sent quickly after Package 1 for stable LED operation
+    // waitForUSBFrameSync(); // REMOVED - causes Package 2 to take too long
     
     // Send Package 2 with proper timing
     Serial.print("📤 Package 2 (gap:");
@@ -773,7 +775,7 @@ void HIDSelector::testLEDCommands() {
         Serial.print("μs)");
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(500);
+            delayMicroseconds(256); // Reduced from 500μs to prevent timing issues
             break;
         }
         Serial.print(" ❌");
@@ -812,8 +814,9 @@ void HIDSelector::testLEDCommands() {
     unsigned long activationStartTime = micros();
     unsigned long pkg2ToActivationGap = activationStartTime - pkg2StartTime; // This includes the 500μs delay
     
-    // Wait for USB frame boundary before sending Activation
-    waitForUSBFrameSync();
+    // CRITICAL: Don't use SOF sync for Activation - it causes timing issues
+    // Activation should be sent quickly after Package 2 for stable LED operation
+    // waitForUSBFrameSync(); // REMOVED - causes Activation to take too long
     
     // Send activation with conservative timing
     Serial.print("📤 Activation (gap:");
@@ -830,9 +833,9 @@ void HIDSelector::testLEDCommands() {
         Serial.print(activationDuration);
         Serial.print("μs)");
         if (rcode == 0) {
-            // CRITICAL: Ensure Activation command always takes ~250μs total (increased buffer)
+            // CRITICAL: Use minimal timing compensation to prevent >1000μs transfers
             // Device expects consistent timing for stable LED operation
-            const unsigned long TARGET_ACTIVATION_TIME = 250; // μs (was 225μs)
+            const unsigned long TARGET_ACTIVATION_TIME = 150; // μs (reduced from 250μs)
             if (activationDuration < TARGET_ACTIVATION_TIME) {
                 unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
                 delayMicroseconds(compensationDelay);
@@ -958,6 +961,9 @@ void HIDSelector::waitForUSBFrameSync() {
         }
     }
     
+    // Add a small buffer after SOF to center Pkg1 in the frame
+    delayMicroseconds(256); // Tune this value as needed (50-100μs)
+    
     // Clear the FRAMEIRQ flag
     pUsb->regWr(rHIRQ, bmFRAMEIRQ);
     
@@ -966,14 +972,96 @@ void HIDSelector::waitForUSBFrameSync() {
     Serial.print(syncDuration);
     Serial.print("μs)");
     
-    // CRITICAL: Ensure minimum spacing between commands to prevent flickering
-    // If SOF sync was too fast (< 100μs), add delay to prevent buffer overflow
-    if (syncDuration < 100) {
-        unsigned long compensationDelay = 100 - syncDuration;
-        Serial.print(" +");
-        Serial.print(compensationDelay);
-        Serial.print("μs compensation");
-        delayMicroseconds(compensationDelay);
+    // CONSERVATIVE drift compensation - DISABLED due to 12s/32s flickering patterns
+    // SOF sync times are stable (184-308μs) and well within normal range
+    // Frame resets were disrupting timing more than helping
+    /*
+    // Track average sync time to detect gradual drift
+    static unsigned long syncTimes[10] = {0};
+    static int syncIndex = 0;
+    static unsigned long lastDriftCheck = 0;
+    
+    // Update rolling average
+    syncTimes[syncIndex] = syncDuration;
+    syncIndex = (syncIndex + 1) % 10;
+    
+    // Check for drift every 100 commands (~30 seconds)
+    if (syncIndex == 0 && (micros() - lastDriftCheck) > 30000000) { // 30 seconds - reduced frequency to prevent 9s pattern
+        lastDriftCheck = micros();
+        
+        // Calculate average sync time
+        unsigned long avgSync = 0;
+        for (int i = 0; i < 10; i++) {
+            avgSync += syncTimes[i];
+        }
+        avgSync /= 10;
+        
+        // MUCH MORE CONSERVATIVE: Only reset if average sync time is extremely high (> 1500μs)
+        // This prevents aggressive resets that cause 9-second flickering patterns
+        if (avgSync > 1500) {
+            Serial.print(" 🔄 Frame reset (drift detected: avg=");
+            Serial.print(avgSync);
+            Serial.print("μs)");
+            
+            // Reset frame counter to prevent long-term drift
+            uint8_t hctlReg = pUsb->regRd(0xE8); // Read HCTL register
+            hctlReg |= 0x02; // Set FRMRST bit (bit 1)
+            pUsb->regWr(0xE8, hctlReg); // Write back to reset frame counter
+            
+            // Clear FRMRST bit after reset
+            delayMicroseconds(100); // Brief delay for reset to take effect
+            hctlReg &= ~0x02; // Clear FRMRST bit
+            pUsb->regWr(0xE8, hctlReg); // Write back
+            
+            // Reset sync time tracking
+            for (int i = 0; i < 10; i++) {
+                syncTimes[i] = 0;
+            }
+        }
+    }
+    */
+    
+    // INTELLIGENT drift compensation - only for significant long-term drift
+    // Uses larger sample size (50 measurements) and longer interval (2 minutes)
+    // Only triggers when average sync time exceeds 1000μs (indicating real drift)
+    static unsigned long syncTimes[50] = {0}; // Larger sample size for better averaging
+    static int syncIndex = 0;
+    static unsigned long lastDriftCheck = 0;
+    static unsigned long commandCount = 0;
+    
+    // Update rolling average
+    syncTimes[syncIndex] = syncDuration;
+    syncIndex = (syncIndex + 1) % 50;
+    commandCount++;
+    
+    // Check for drift every 1 minute (~600 commands) with larger sample size
+    if (syncIndex == 0 && (micros() - lastDriftCheck) > 60000000) { // 1 minute - more responsive
+        lastDriftCheck = micros();
+        
+        // Calculate average sync time over 50 measurements
+        unsigned long avgSync = 0;
+        for (int i = 0; i < 50; i++) {
+            avgSync += syncTimes[i];
+        }
+        avgSync /= 50;
+        
+        Serial.print("📊 Drift check: avg sync time = ");
+        Serial.print(avgSync);
+        Serial.print("μs over 50 measurements");
+        
+        // Only reset frame counter if average sync time exceeds 800μs (indicating real drift)
+        if (avgSync > 800) {
+            Serial.print(" ⚠️ Drift detected! Resetting frame counter...");
+            
+            // Reset frame counter to synchronize timing
+            pUsb->regWr(rHCTL, bmFRMRST);
+            delayMicroseconds(50); // Brief delay for reset to take effect
+            pUsb->regWr(rHCTL, 0x00); // Clear reset bit
+            
+            Serial.println(" ✅ Frame counter reset complete");
+        } else {
+            Serial.println(" ✅ Timing stable, no action needed");
+        }
     }
     Serial.println();
 }
