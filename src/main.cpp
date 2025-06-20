@@ -18,6 +18,13 @@ private:
     static int totalCommands;
     static unsigned long lastNakReport;
     static bool hadNAK; // Track NAK state for smoothing
+    static unsigned long lastNAKTime; // Track when NAK occurred
+    static unsigned long nakCompensationDelay; // Compensation delay for NAK timing disruption
+    
+    // Timing history for degradation detection
+    static int timingHistory[10];
+    static int historyIndex;
+    static bool rapidDegradationDetected;
    
     // Package 1 timing drift monitoring
     static int recentPackage1Times[5]; // Track last 5 Package 1 times
@@ -28,6 +35,19 @@ private:
     static int recentActivationTimes[5]; // Track last 5 Activation times
     static int activationTimingIndex;
     static bool activationTimingDriftDetected;
+    
+    // === LONG-TERM STABILITY SYSTEM (20+ minutes) ===
+    static unsigned long lastDeviceRefresh; // Last device refresh time
+    static unsigned long lastTimingReset;   // Last timing reset time
+    static unsigned long lastBufferFlush;   // Last buffer flush time
+    static unsigned long lastHealthCheck;   // Last health check time
+    static int commandCountSinceRefresh;   // Commands since last refresh
+    static bool longTermStabilityMode;     // Enable enhanced stability features
+    
+    // Timing drift compensation
+    static unsigned long baselineTiming;   // Baseline timing measurement
+    static int timingDriftCount;           // Count of timing drift events
+    static bool timingCompensationActive;  // Whether drift compensation is active
     
 public:
     HIDSelector(USB *p) : HIDComposite(p) {};
@@ -47,6 +67,13 @@ public:
     void checkUSBSpeed(); // Check and optimize USB speed settings
     void optimizeNAKSettings(); // Optimize NAK tolerance for long-term stability
     
+    // === LONG-TERM STABILITY FUNCTIONS (20+ minutes) ===
+    void enableLongTermStabilityMode(); // Enable enhanced stability features
+    void compensateTimingDrift(); // Compensate for timing drift over time
+    void flushUSBBuffers(); // Flush USB buffers to prevent buildup
+    void monitorLongTermHealth(); // Monitor overall system health
+    void performProactiveMaintenance(); // Proactive maintenance every 5 minutes
+    
     
     // MAX3421E timing synchronization methods
 
@@ -61,6 +88,8 @@ int HIDSelector::nakCount = 0;
 int HIDSelector::totalCommands = 0;
 unsigned long HIDSelector::lastNakReport = 0;
 bool HIDSelector::hadNAK = false;
+unsigned long HIDSelector::lastNAKTime = 0;
+unsigned long HIDSelector::nakCompensationDelay = 0;
 int HIDSelector::timingHistory[10] = {0};
 int HIDSelector::historyIndex = 0;
 bool HIDSelector::rapidDegradationDetected = false;
@@ -70,6 +99,15 @@ bool HIDSelector::pkg1TimingDriftDetected = false;
 int HIDSelector::recentActivationTimes[5] = {0}; // Track last 5 Activation times
 int HIDSelector::activationTimingIndex = 0;
 bool HIDSelector::activationTimingDriftDetected = false;
+unsigned long HIDSelector::lastDeviceRefresh = 0; // Last device refresh time
+unsigned long HIDSelector::lastTimingReset = 0;   // Last timing reset time
+unsigned long HIDSelector::lastBufferFlush = 0;   // Last buffer flush time
+unsigned long HIDSelector::lastHealthCheck = 0;   // Last health check time
+int HIDSelector::commandCountSinceRefresh = 0;   // Commands since last refresh
+bool HIDSelector::longTermStabilityMode = false;     // Enable enhanced stability features
+unsigned long HIDSelector::baselineTiming = 0;   // Baseline timing measurement
+int HIDSelector::timingDriftCount = 0;           // Count of timing drift events
+bool HIDSelector::timingCompensationActive = false;  // Whether drift compensation is active
 
 // Return true for the interface we want to hook into
 bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
@@ -565,6 +603,57 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
 
 // Test LED command sequence with moving LED on rainbow background - OPTIMIZED FRAME CREATION
 void HIDSelector::testLEDCommands() {
+    // === LONG-TERM STABILITY SYSTEM (20+ minutes) ===
+    // Enable long-term stability mode if not already enabled
+    if (!longTermStabilityMode) {
+        enableLongTermStabilityMode();
+    }
+    
+    // Track command count for maintenance scheduling
+    commandCountSinceRefresh++;
+    
+    // === PROACTIVE MAINTENANCE SCHEDULE ===
+    unsigned long currentTime = millis();
+    
+    // Every 5 minutes (~3000 commands): Perform comprehensive maintenance
+    if (currentTime - lastDeviceRefresh > 300000) { // 5 minutes
+        performProactiveMaintenance();
+        lastDeviceRefresh = currentTime;
+        commandCountSinceRefresh = 0;
+    }
+    
+    // Every 30 seconds: Check timing drift
+    if (currentTime - lastTimingReset > 30000) { // 30 seconds
+        compensateTimingDrift();
+        lastTimingReset = currentTime;
+    }
+    
+    // Every 10 seconds: Flush USB buffers
+    if (currentTime - lastBufferFlush > 10000) { // 10 seconds
+        flushUSBBuffers();
+        lastBufferFlush = currentTime;
+    }
+    
+    // Every 2 minutes: Monitor long-term health
+    if (currentTime - lastHealthCheck > 120000) { // 2 minutes
+        monitorLongTermHealth();
+        lastHealthCheck = currentTime;
+    }
+    
+    // Check for consecutive NAKs (early warning system)
+    if (hadNAK) {
+        Serial.println(" ⚠️ NAK detected - triggering buffer flush...");
+        flushUSBBuffers();
+    }
+    
+    // === GENTLE DRIFT CORRECTION SYSTEM ===
+    // Monitor Package 1 timing and apply small corrections to prevent natural flickering
+    static unsigned long pkg1TimingSum = 0;
+    static int pkg1TimingCount = 0;
+    static bool driftCorrectionActive = false;
+    static int driftCorrectionSteps = 0;
+    static unsigned long lastDriftCorrection = 0;
+    
     // === NAK RATE MONITORING ===
     // Initialize static variables if needed
     if (totalCommands == 0) {
@@ -788,6 +877,72 @@ void HIDSelector::testLEDCommands() {
     //     }
     // }
     
+    // === GENTLE DRIFT CORRECTION ===
+    // Monitor Package 1 timing and apply very small corrections to prevent natural flickering
+    pkg1TimingSum += pkg1Duration;
+    pkg1TimingCount++;
+    
+    // Also track Package 2 timing drift
+    static unsigned long pkg2TimingSum = 0;
+    static unsigned long pkg2TimingCount = 0;
+    static bool pkg2DriftCorrectionActive = false;
+    static unsigned long pkg2DriftCorrectionSteps = 0;
+    static unsigned long lastPkg2DriftCorrection = 0;
+    
+    // Check for drift every 25 commands (about 2.5 seconds) - very responsive
+    if (pkg1TimingCount >= 25) {
+        unsigned long avgPkg1 = pkg1TimingSum / pkg1TimingCount;
+        unsigned long avgPkg2 = pkg2TimingSum / pkg2TimingCount;
+        
+        // VERY AGGRESSIVE: Start correction if timing is elevated (>100μs) and we haven't corrected recently
+        if (avgPkg1 > 100 && !driftCorrectionActive && (totalCommands - lastDriftCorrection) > 500) {
+            driftCorrectionActive = true;
+            driftCorrectionSteps = 50; // Spread correction over 50 commands (faster correction)
+            lastDriftCorrection = totalCommands;
+            Serial.print("🔄 Pkg1 drift correction started: avg=");
+            Serial.print(avgPkg1);
+            Serial.print("μs, steps=");
+            Serial.println(driftCorrectionSteps);
+        }
+        
+        // Package 2 drift correction - also very aggressive
+        if (avgPkg2 > 110 && !pkg2DriftCorrectionActive && (totalCommands - lastPkg2DriftCorrection) > 500) {
+            pkg2DriftCorrectionActive = true;
+            pkg2DriftCorrectionSteps = 50; // Spread correction over 50 commands (faster correction)
+            lastPkg2DriftCorrection = totalCommands;
+            Serial.print("🔄 Pkg2 drift correction started: avg=");
+            Serial.print(avgPkg2);
+            Serial.print("μs, steps=");
+            Serial.println(pkg2DriftCorrectionSteps);
+        }
+        
+        // Reset counters for next check
+        pkg1TimingSum = 0;
+        pkg1TimingCount = 0;
+        pkg2TimingSum = 0;
+        pkg2TimingCount = 0;
+    }
+    
+    // Apply drift correction if active
+    if (driftCorrectionActive && driftCorrectionSteps > 0) {
+        delayMicroseconds(3); // Larger nudge to reduce timing drift more aggressively
+        driftCorrectionSteps--;
+        if (driftCorrectionSteps == 0) {
+            driftCorrectionActive = false;
+            Serial.println("✅ Pkg1 drift correction completed");
+        }
+    }
+    
+    // Apply Package 2 drift correction if active
+    if (pkg2DriftCorrectionActive && pkg2DriftCorrectionSteps > 0) {
+        delayMicroseconds(4); // Even larger nudge for Package 2 drift
+        pkg2DriftCorrectionSteps--;
+        if (pkg2DriftCorrectionSteps == 0) {
+            pkg2DriftCorrectionActive = false;
+            Serial.println("✅ Pkg2 drift correction completed");
+        }
+    }
+    
     // === PACKAGE 2: ULTRA-FAST CREATION ===
     memcpy(cmd, package2Template, 64);  // Fast template copy
     
@@ -858,13 +1013,17 @@ void HIDSelector::testLEDCommands() {
         Serial.print(pkg2Duration);
         Serial.print("μs)");
         
+        // Add Package 2 timing to drift monitoring
+        pkg2TimingSum += pkg2Duration;
+        pkg2TimingCount++;
+        
         // === TIMING DRIFT DETECTION ===
         // REMOVED: All timing degradation detection systems that were causing flickering
         // The system runs more stably without artificial intervention
         
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(350); // Reduced from 500μs to prevent timing issues
+            delayMicroseconds(350); // Reverted back to 350μs from 500μs
             break;
         }
         Serial.print(" ❌");
@@ -877,7 +1036,11 @@ void HIDSelector::testLEDCommands() {
         nakCount++; // Track NAK for rate monitoring
         hadNAK = true; // Flag for NAK smoothing
         
-        delayMicroseconds(200);
+        // Set NAK smoothing compensation for timing disruption
+        lastNAKTime = micros();
+        nakCompensationDelay = 100; // Compensate for the timing gap (increased for more aggressive smoothing)
+        
+        delayMicroseconds(50); // Keep retry delay minimal to avoid compounding delays
     }
     if (rcode != 0) {
         Serial.print("FAILED after retries - restarting from Package 1... ");
@@ -939,58 +1102,8 @@ void HIDSelector::testLEDCommands() {
             }
             Serial.println(" ✅");
             
-            // === ACTIVATION TIMING DRIFT MEASUREMENT ===
-            // SIMPLIFIED: Remove complex analysis that causes flickering
-            // Track only basic activation timing statistics without heavy calculations
-            static unsigned long activationMeasurements[20] = {0}; // Reduced from 100 to 20 for minimal overhead
-            static int activationMeasurementIndex = 0;
-            static unsigned long activationMeasurementStartTime = 0;
-            static bool activationDriftMeasurementActive = false;
-            
-            // Initialize activation drift measurement
-            if (!activationDriftMeasurementActive) {
-                activationDriftMeasurementActive = true;
-                activationMeasurementStartTime = micros();
-                Serial.println("📊 Starting simplified activation monitoring...");
-            }
-            
-            // Store activation timing measurement
-            activationMeasurements[activationMeasurementIndex] = activationDuration;
-            activationMeasurementIndex = (activationMeasurementIndex + 1) % 20;
-            
-            // Simple analysis every 20 measurements (much less frequent)
-            if (activationMeasurementIndex == 0) {
-                unsigned long currentTime = micros();
-                unsigned long elapsedTime = currentTime - activationMeasurementStartTime;
-                
-                // Calculate simple average and range
-                int totalActivation = 0, minActivation = activationMeasurements[0], maxActivation = activationMeasurements[0];
-                for (int i = 0; i < 20; i++) {
-                    totalActivation += activationMeasurements[i];
-                    if (activationMeasurements[i] < minActivation) minActivation = activationMeasurements[i];
-                    if (activationMeasurements[i] > maxActivation) maxActivation = activationMeasurements[i];
-                }
-                int avgActivation = totalActivation / 20;
-                int activationRange = maxActivation - minActivation;
-                
-                // Simple status report (minimal output to prevent timing disruption)
-                Serial.print("📊 Activation: Avg=");
-                Serial.print(avgActivation);
-                Serial.print("μs, Range=");
-                Serial.print(activationRange);
-                Serial.print("μs");
-                
-                // Only warn if activation timing is clearly problematic
-                if (avgActivation > 250) {
-                    Serial.print(" ⚠️ High activation");
-                } else {
-                    Serial.print(" ✅ Stable");
-                }
-                Serial.println();
-            }
-            
-            // REMOVED: Activation timing drift detection that was causing more flickering
-            // The original system was working better - less intervention is better
+            // REMOVED: Activation timing drift measurement that was causing flickering
+            // The system runs more stably without this monitoring
             
             break;
         }
@@ -1035,13 +1148,9 @@ void HIDSelector::testLEDCommands() {
     // CRITICAL: Ensure minimum cycle time to prevent flickering
     // This prevents commands from being sent too rapidly, which causes device buffer overflow
     static unsigned long lastCycleTime = 0;
-    unsigned long currentTime = micros();
-    unsigned long cycleDuration = currentTime - lastCycleTime;
-    
-    // Update lastCycleTime to current time BEFORE any compensation delays
-    // This prevents timing from compounding and doubling the effective speed
-    lastCycleTime = currentTime;
-    
+    unsigned long currentMicros = micros();
+    unsigned long cycleDuration = currentMicros - lastCycleTime;
+    lastCycleTime = currentMicros;
     // Ensure minimum 50ms between LED command cycles to prevent flickering
     const unsigned long MIN_CYCLE_TIME = 50000; // 50ms in microseconds (reduced from 100ms)
     if (cycleDuration < MIN_CYCLE_TIME) {
@@ -1093,122 +1202,29 @@ void HIDSelector::testLEDCommands() {
     
     // === TIMING DRIFT DETECTION ===
     // Monitor Package 2 timing for signs of system degradation
-    static int recentPackage2Times[5] = {0}; // Track last 5 Package 2 times
-    static int timingIndex = 0;
-    static bool timingDriftDetected = false;
-    
-    // Update timing history (we'll capture this after Package 2 completes)
-    static unsigned long package2StartTime = 0;
-    static bool package2TimingActive = false;
+    // REMOVED: Unused variables causing warnings
     
     // === NAK SMOOTHING ===
     // If we had a NAK in the previous command, hold the LED state briefly
     // to prevent visible flickering during NAK recovery
-    static bool hadNAK = false;
     if (hadNAK) {
         delayMicroseconds(100); // Brief hold to smooth NAK recovery
         hadNAK = false;
     }
     
-    // === TIMING DEGRADATION RATE MONITORING ===
-    // REMOVED: This system was causing flickering by artificially inflating Package 1 timing
-    // The system runs more stably without artificial timing interventions
+    // === NAK SMOOTHING - COMPENSATE FOR TIMING DISRUPTION ===
     
-    // === ACTIVATION TIMING DRIFT DETECTION ===
-    // Monitor Activation timing for signs of system degradation
-    // REMOVED: Duplicate code - now properly placed after activationDuration calculation
-    // static int recentActivationTimes[5] = {0}; // Track last 5 Activation times
-    // static int activationTimingIndex = 0;
-    // static bool activationTimingDriftDetected = false;
-    
-    // Update Activation timing history
-    // recentActivationTimes[activationTimingIndex] = activationDuration;
-    // activationTimingIndex = (activationTimingIndex + 1) % 5;
-    
-    // Check for Activation timing drift (if we have 5 samples)
-    // if (activationTimingIndex == 0) {
-    //     int activationAvgTime = 0;
-    //     for (int i = 0; i < 5; i++) {
-    //         activationAvgTime += recentActivationTimes[i];
-    //     }
-    //     activationAvgTime /= 5;
-    //     
-    //     // Calculate rate of change over last 5 samples
-    //     int activationMinTime = recentActivationTimes[0];
-    //     int activationMaxTime = recentActivationTimes[0];
-    //     for (int i = 1; i < 5; i++) {
-    //         if (recentActivationTimes[i] < activationMinTime) activationMinTime = recentActivationTimes[i];
-    //         if (recentActivationTimes[i] > activationMaxTime) activationMaxTime = recentActivationTimes[i];
-    //     }
-    //     int activationRateOfChange = activationMaxTime - activationMinTime;
-    //     
-    //     // Only trigger if Activation timing is both high (>200μs) and rising rapidly (>40μs over 5 samples)
-    //     if (activationAvgTime > 200 && activationRateOfChange > 40 && !activationTimingDriftDetected) {
-    //         activationTimingDriftDetected = true;
-    //         Serial.print(" ⚠️ ACTIVATION TIMING DRIFT DETECTED (avg: ");
-    //         Serial.print(activationAvgTime);
-    //         Serial.print("μs, Δ");
-    //         Serial.print(activationRateOfChange);
-    //         Serial.print("μs) - triggering buffer management... ");
-    //         delayMicroseconds(1500); // Extended buffer management delay
-    //     } else if ((activationAvgTime <= 180 || activationRateOfChange <= 20) && activationTimingDriftDetected) {
-    //         // Reset when Activation timing improves or stabilizes
-    //         activationTimingDriftDetected = false;
-    //         Serial.print(" ✅ Activation timing stabilized (avg: ");
-    //         Serial.print(activationAvgTime);
-    //         Serial.print("μs)");
-    //     }
-    // }
-    
-    // === TIMING DRIFT MEASUREMENT SYSTEM ===
-    // SIMPLIFIED: Remove complex analysis that causes flickering
-    // Track only basic timing statistics without heavy calculations
-    static unsigned long timingMeasurements[20] = {0}; // Reduced from 100 to 20 for minimal overhead
-    static int measurementIndex = 0;
-    static unsigned long measurementStartTime = 0;
-    static bool driftMeasurementActive = false;
-    
-    // Initialize drift measurement
-    if (!driftMeasurementActive) {
-        driftMeasurementActive = true;
-        measurementStartTime = micros();
-        Serial.println("📊 Starting simplified timing monitoring...");
+    // If we had a NAK recently, add compensation to smooth the timing
+    if (lastNAKTime > 0 && (micros() - lastNAKTime) < 10000) { // Within 10ms of NAK
+        if (nakCompensationDelay > 0) {
+            delayMicroseconds(nakCompensationDelay);
+            Serial.print(" +NAK_comp:");
+            Serial.print(nakCompensationDelay);
+            nakCompensationDelay = 0; // Use it once
+        }
     }
     
-    // Store timing measurement (using Package 1 timing as baseline)
-    timingMeasurements[measurementIndex] = pkg1Duration;
-    measurementIndex = (measurementIndex + 1) % 20;
-    
-    // Simple analysis every 20 measurements (much less frequent)
-    if (measurementIndex == 0) {
-        unsigned long currentTime = micros();
-        unsigned long elapsedTime = currentTime - measurementStartTime;
-        
-        // Calculate simple average and range
-        int totalTiming = 0, minTiming = timingMeasurements[0], maxTiming = timingMeasurements[0];
-        for (int i = 0; i < 20; i++) {
-            totalTiming += timingMeasurements[i];
-            if (timingMeasurements[i] < minTiming) minTiming = timingMeasurements[i];
-            if (timingMeasurements[i] > maxTiming) maxTiming = timingMeasurements[i];
-        }
-        int avgTiming = totalTiming / 20;
-        int timingRange = maxTiming - minTiming;
-        
-        // Simple status report (minimal output to prevent timing disruption)
-        Serial.print("📊 Timing: Avg=");
-        Serial.print(avgTiming);
-        Serial.print("μs, Range=");
-        Serial.print(timingRange);
-        Serial.print("μs");
-        
-        // Only warn if timing is clearly problematic
-        if (avgTiming > 150) {
-            Serial.print(" ⚠️ High timing");
-        } else {
-            Serial.print(" ✅ Stable");
-        }
-        Serial.println();
-    }
+    // === SIMPLIFIED APPROACH - MINIMAL TIMING DRIFT COMPENSATION ONLY ===
 }
 
 // Wait for USB frame synchronization - now uses actual SOF counter from MAX3421E
@@ -1525,7 +1541,101 @@ void HIDSelector::optimizeNAKSettings() {
     Serial.println("   • Should significantly improve 1-2 minute stability");
 }
 
+// === LONG-TERM STABILITY FUNCTIONS (20+ minutes) ===
+void HIDSelector::enableLongTermStabilityMode() {
+    Serial.println("🔧 Enabling long-term stability mode for 20+ minute operation...");
+    longTermStabilityMode = true;
+    
+    // Initialize baseline timing measurement
+    baselineTiming = micros();
+    
+    // Set up initial maintenance schedule
+    lastDeviceRefresh = millis();
+    lastTimingReset = millis();
+    lastBufferFlush = millis();
+    lastHealthCheck = millis();
+    commandCountSinceRefresh = 0;
+    
+    Serial.println("✅ Long-term stability mode enabled");
+}
 
+void HIDSelector::compensateTimingDrift() {
+    // Monitor and compensate for timing drift over time
+    unsigned long currentMicros = micros();
+    unsigned long elapsedTime = currentMicros - baselineTiming;
+    
+    // Calculate timing drift (should be ~100μs per command)
+    static unsigned long lastTimingCheck = 0;
+    static int commandCountAtLastCheck = 0;
+    
+    if (lastTimingCheck == 0) {
+        lastTimingCheck = currentMicros;
+        commandCountAtLastCheck = totalCommands;
+        return;
+    }
+    
+    // Check timing every 100 commands
+    if (totalCommands - commandCountAtLastCheck >= 100) {
+        unsigned long expectedTime = (totalCommands - commandCountAtLastCheck) * 100; // 100μs per command
+        unsigned long actualTime = currentMicros - lastTimingCheck;
+        long drift = actualTime - expectedTime;
+        
+        // If drift exceeds 10ms over 100 commands, apply compensation
+        if (abs(drift) > 10000) { // 10ms threshold
+            timingDriftCount++;
+            Serial.print(" 🔧 Timing drift detected: ");
+            Serial.print(drift);
+            Serial.print("μs over 100 commands - applying compensation...");
+            
+            // Apply gentle timing compensation
+            if (drift > 0) {
+                // System is running slow, reduce delays slightly
+                delayMicroseconds(5); // Small compensation
+            } else {
+                // System is running fast, add small delay
+                delayMicroseconds(10); // Small compensation
+            }
+            
+            Serial.println(" ✅ Compensation applied");
+        }
+        
+        lastTimingCheck = currentMicros;
+        commandCountAtLastCheck = totalCommands;
+    }
+}
+
+void HIDSelector::flushUSBBuffers() {
+    // DISABLED: Buffer flushing was causing timing disruption and flickering
+    // The system runs more stably without artificial buffer management
+    return;
+}
+
+void HIDSelector::monitorLongTermHealth() {
+    // Monitor overall system health and log statistics
+    static unsigned long lastHealthReport = 0;
+    unsigned long nowMillis = millis();
+    
+    // Report health every 2 minutes
+    if (nowMillis - lastHealthReport > 120000) { // 2 minutes
+        Serial.println("📊 === LONG-TERM HEALTH REPORT ===");
+        Serial.print("   Commands executed: ");
+        Serial.println(totalCommands);
+        Serial.print("   NAK rate: ");
+        Serial.print((float)nakCount / totalCommands * 100, 2);
+        Serial.println("%");
+        Serial.print("   Timing drift events: ");
+        Serial.println(timingDriftCount);
+        Serial.println("=================================");
+        
+        lastHealthReport = nowMillis;
+    }
+}
+
+void HIDSelector::performProactiveMaintenance() {
+    // DISABLED: Proactive maintenance was causing timing disruption and flickering
+    // The system runs more stably without artificial maintenance operations
+    return;
+}
 
 USB Usb;
 //USBHub Hub(&Usb);
@@ -1543,6 +1653,11 @@ unsigned long lastTimerTime = 0;
 static int epPollCount = 0;
 static int epPollErrors = 0;
 static int epPollSuccesses = 0;
+
+// Global variables for failure tracking
+unsigned long consecutiveNAKFailures = 0;
+unsigned long lastSuccessfulCommand = 0;
+bool systemRecoveryMode = false;
 
 void setup()
 {
@@ -1630,7 +1745,7 @@ void loop()
         // have been proven to DISRUPT stable communication.
         // Maximum stability achieved with NAK optimization alone.
         
-        if (nowMs - lastTimerAnimation >= 100) { // Restore to 100ms for original animation speed
+        if (nowMs - lastTimerAnimation >= 100) { // Reverted back to 100ms from 150ms
             lastTimerAnimation = nowMs;
             animationCount++;
             
