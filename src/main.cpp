@@ -605,14 +605,19 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
 void HIDSelector::testLEDCommands() {
     // === LONG-TERM STABILITY SYSTEM (20+ minutes) ===
     // Enable long-term stability mode if not already enabled
+    // DISABLED: Drift correction logic removed as requested
+    /*
     if (!longTermStabilityMode) {
         enableLongTermStabilityMode();
     }
+    */
     
     // Track command count for maintenance scheduling
     commandCountSinceRefresh++;
     
     // === PROACTIVE MAINTENANCE SCHEDULE ===
+    // DISABLED: Drift correction logic removed as requested
+    /*
     unsigned long currentTime = millis();
     
     // Every 5 minutes (~3000 commands): Perform comprehensive maintenance
@@ -624,7 +629,8 @@ void HIDSelector::testLEDCommands() {
     
     // Every 30 seconds: Check timing drift
     if (currentTime - lastTimingReset > 30000) { // 30 seconds
-        compensateTimingDrift();
+        // DISABLED: Drift correction logic removed as requested
+        // compensateTimingDrift();
         lastTimingReset = currentTime;
     }
     
@@ -639,20 +645,27 @@ void HIDSelector::testLEDCommands() {
         monitorLongTermHealth();
         lastHealthCheck = currentTime;
     }
+    */
     
     // Check for consecutive NAKs (early warning system)
+    // DISABLED: Drift correction logic removed as requested
+    /*
     if (hadNAK) {
         Serial.println(" ⚠️ NAK detected - triggering buffer flush...");
         flushUSBBuffers();
     }
+    */
     
     // === GENTLE DRIFT CORRECTION SYSTEM ===
+    // DISABLED: Drift correction logic removed as requested
     // Monitor Package 1 timing and apply small corrections to prevent natural flickering
+    /*
     static unsigned long pkg1TimingSum = 0;
     static int pkg1TimingCount = 0;
     static bool driftCorrectionActive = false;
     static int driftCorrectionSteps = 0;
     static unsigned long lastDriftCorrection = 0;
+    */
     
     // === NAK RATE MONITORING ===
     // Initialize static variables if needed
@@ -679,8 +692,8 @@ void HIDSelector::testLEDCommands() {
     // Pre-built Package 1 template (no dynamic changes needed)
     static const uint8_t package1Template[64] = {
         0x56, 0x83, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 
-        0x80, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+        0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00,
         // RGB data starts at position 24 - will be filled below
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -801,7 +814,7 @@ void HIDSelector::testLEDCommands() {
     // CRITICAL: Don't use SOF sync for Package 1 - it causes >1000μs transfer times
     // Package 1 should be sent immediately for stable LED operation
     // waitForUSBFrameSync(); // REMOVED - causes Package 1 to take too long
-    
+     delayMicroseconds(903);
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     unsigned long pkg1EndTime = micros();
@@ -814,11 +827,11 @@ void HIDSelector::testLEDCommands() {
     Serial.print("μs)");
     if (rcode == 0) {
         Serial.print(" ✅ → ");
-        delayMicroseconds(250); // Reduced from 200μs to prevent timing issues
+        //delayMicroseconds(2998); // Reduced from 200μs to prevent timing issues
     } else {
         Serial.print(" ❌ | ");
         for (int retry = 0; retry < 2; retry++) {
-            delayMicroseconds(250); // Reduced delay
+            //delayMicroseconds(250); // Reduced delay
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             Serial.print("retry=0x");
             Serial.print(rcode, HEX);
@@ -831,7 +844,7 @@ void HIDSelector::testLEDCommands() {
             return;
         }
         Serial.print("recovered → ");
-        delayMicroseconds(200); // Reduced delay
+        //delayMicroseconds(200); // Reduced delay
     }
     
     // === PACKAGE 1 TIMING DRIFT DETECTION ===
@@ -878,7 +891,9 @@ void HIDSelector::testLEDCommands() {
     // }
     
     // === GENTLE DRIFT CORRECTION ===
+    // DISABLED: Drift correction logic removed as requested
     // Monitor Package 1 timing and apply very small corrections to prevent natural flickering
+    /*
     pkg1TimingSum += pkg1Duration;
     pkg1TimingCount++;
     
@@ -942,6 +957,7 @@ void HIDSelector::testLEDCommands() {
             Serial.println("✅ Pkg2 drift correction completed");
         }
     }
+    */
     
     // === PACKAGE 2: ULTRA-FAST CREATION ===
     memcpy(cmd, package2Template, 64);  // Fast template copy
@@ -1003,6 +1019,7 @@ void HIDSelector::testLEDCommands() {
     Serial.print(pkg1ToPkg2Gap);
     Serial.print("μs)... ");
     for (int retry = 0; retry < 3; retry++) {
+        delayMicroseconds(903);
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         unsigned long pkg2EndTime = micros();
         unsigned long pkg2Duration = pkg2EndTime - pkg2StartTime;
@@ -1014,8 +1031,11 @@ void HIDSelector::testLEDCommands() {
         Serial.print("μs)");
         
         // Add Package 2 timing to drift monitoring
+        // DISABLED: Drift correction logic removed as requested
+        /*
         pkg2TimingSum += pkg2Duration;
         pkg2TimingCount++;
+        */
         
         // === TIMING DRIFT DETECTION ===
         // REMOVED: All timing degradation detection systems that were causing flickering
@@ -1023,7 +1043,7 @@ void HIDSelector::testLEDCommands() {
         
         if (rcode == 0) {
             Serial.print(" ✅ → ");
-            delayMicroseconds(350); // Reverted back to 350μs from 500μs
+            //delayMicroseconds(100); // Reverted back to 350μs from 500μs
             break;
         }
         Serial.print(" ❌");
@@ -1040,13 +1060,14 @@ void HIDSelector::testLEDCommands() {
         lastNAKTime = micros();
         nakCompensationDelay = 100; // Compensate for the timing gap (increased for more aggressive smoothing)
         
-        delayMicroseconds(50); // Keep retry delay minimal to avoid compounding delays
+        //delayMicroseconds(50); // Keep retry delay minimal to avoid compounding delays
     }
     if (rcode != 0) {
         Serial.print("FAILED after retries - restarting from Package 1... ");
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, package1Backup);
         if (rcode == 0) {
             Serial.print("Pkg1 resent ✅ → ");
+            delayMicroseconds(903);
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             if (rcode == 0) {
                 Serial.print("Pkg2 recovered ✅ → ");
@@ -1078,6 +1099,7 @@ void HIDSelector::testLEDCommands() {
     Serial.print(pkg2ToActivationGap);
     Serial.print("μs)... ");
     for (int retry = 0; retry < 5; retry++) {
+        delayMicroseconds(1903);
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         unsigned long activationEndTime = micros();
         unsigned long activationDuration = activationEndTime - activationStartTime;
@@ -1093,7 +1115,7 @@ void HIDSelector::testLEDCommands() {
             const unsigned long TARGET_ACTIVATION_TIME = 180; // μs (reduced from 250μs)
             if (activationDuration < TARGET_ACTIVATION_TIME) {
                 unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
-                delayMicroseconds(compensationDelay);
+                //delayMicroseconds(compensationDelay);
                 Serial.print(" +");
                 Serial.print(compensationDelay);
                 Serial.print("μs=");
@@ -1147,43 +1169,43 @@ void HIDSelector::testLEDCommands() {
     
     // CRITICAL: Ensure minimum cycle time to prevent flickering
     // This prevents commands from being sent too rapidly, which causes device buffer overflow
-    static unsigned long lastCycleTime = 0;
-    unsigned long currentMicros = micros();
-    unsigned long cycleDuration = currentMicros - lastCycleTime;
-    lastCycleTime = currentMicros;
-    // Ensure minimum 50ms between LED command cycles to prevent flickering
-    const unsigned long MIN_CYCLE_TIME = 50000; // 50ms in microseconds (reduced from 100ms)
-    if (cycleDuration < MIN_CYCLE_TIME) {
-        unsigned long compensationDelay = MIN_CYCLE_TIME - cycleDuration;
-        Serial.print("⏰ Cycle timing compensation: +");
-        Serial.print(compensationDelay / 1000);
-        Serial.println("ms");
-        delayMicroseconds(compensationDelay);
-    }
+    // static unsigned long lastCycleTime = 0;
+    // unsigned long currentMicros = micros();
+    // unsigned long cycleDuration = currentMicros - lastCycleTime;
+    // lastCycleTime = currentMicros;
+    // // Ensure minimum 50ms between LED command cycles to prevent flickering
+    // const unsigned long MIN_CYCLE_TIME = 50000; // 50ms in microseconds (reduced from 100ms)
+    // if (cycleDuration < MIN_CYCLE_TIME) {
+    //     unsigned long compensationDelay = MIN_CYCLE_TIME - cycleDuration;
+    //     Serial.print("⏰ Cycle timing compensation: +");
+    //     Serial.print(compensationDelay / 1000);
+    //     Serial.println("ms");
+    //     delayMicroseconds(compensationDelay);
+    // }
     
     // === NAK RATE MONITORING ===
     // SIMPLIFIED: Track NAKs with minimal impact on timing
-    if (totalCommands % 100 == 0) {
-        float nakRate = (float)nakCount / 100.0 * 100.0; // Percentage
-        Serial.print("📊 NAK Rate: ");
-        Serial.print(nakRate, 1);
-        Serial.print("% (");
-        Serial.print(nakCount);
-        Serial.print("/100)");
+    // if (totalCommands % 100 == 0) {
+    //     float nakRate = (float)nakCount / 100.0 * 100.0; // Percentage
+    //     Serial.print("📊 NAK Rate: ");
+    //     Serial.print(nakRate, 1);
+    //     Serial.print("% (");
+    //     Serial.print(nakCount);
+    //     Serial.print("/100)");
         
-        // Only take action for very high NAK rates (>15%)
-        if (nakRate > 15.0) {
-            Serial.print(" ⚠️ HIGH NAK RATE");
-            // Minimal intervention - just a brief pause
-            delayMicroseconds(200);
-        } else {
-            Serial.print(" ✅ Normal");
-        }
-        Serial.println();
+    //     // Only take action for very high NAK rates (>15%)
+    //     if (nakRate > 15.0) {
+    //         Serial.print(" ⚠️ HIGH NAK RATE");
+    //         // Minimal intervention - just a brief pause
+    //         delayMicroseconds(200);
+    //     } else {
+    //         Serial.print(" ✅ Normal");
+    //     }
+    //     Serial.println();
         
-        // Reset counters
-        nakCount = 0;
-    }
+    //     // Reset counters
+    //     nakCount = 0;
+    // }
     
     // === NAK SMOOTHING ===
     // If we had a NAK in the previous command, hold the LED state briefly
@@ -1560,6 +1582,8 @@ void HIDSelector::enableLongTermStabilityMode() {
 }
 
 void HIDSelector::compensateTimingDrift() {
+    // DISABLED: Drift correction logic removed as requested
+    /*
     // Monitor and compensate for timing drift over time
     unsigned long currentMicros = micros();
     unsigned long elapsedTime = currentMicros - baselineTiming;
@@ -1602,6 +1626,7 @@ void HIDSelector::compensateTimingDrift() {
         lastTimingCheck = currentMicros;
         commandCountAtLastCheck = totalCommands;
     }
+    */
 }
 
 void HIDSelector::flushUSBBuffers() {
