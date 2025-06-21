@@ -42,11 +42,12 @@ protected:
     
     /* Internal device setup methods */
     uint8_t initializeDevice();
-    bool activateInterface0();
-    bool activateInterface1();
-    bool sendInitializationSequence();
-    bool sendCommandWithProperAck(uint8_t* cmd);
-    bool testSimpleLEDCommand();
+    uint8_t activateInterface0();
+    uint8_t activateInterface1();
+    uint8_t sendInitializationSequence();
+    uint8_t sendCommandWithProperAck(uint8_t* cmd);
+    uint8_t sendSimpleLEDTest();
+    uint8_t activateCustomMode();
     void setupDeviceSpecific();
     void discoverEndpoints();
     uint8_t sendCommand(uint8_t* data, uint16_t len);
