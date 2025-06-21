@@ -49,6 +49,9 @@ private:
     static int timingDriftCount;           // Count of timing drift events
     static bool timingCompensationActive;  // Whether drift compensation is active
     
+    // === DYNAMIC TIMING COMPENSATION ===
+    static unsigned long accumulatedCompensation; // Accumulated timing compensation to apply
+    
 public:
     HIDSelector(USB *p) : HIDComposite(p) {};
     
@@ -108,6 +111,9 @@ bool HIDSelector::longTermStabilityMode = false;     // Enable enhanced stabilit
 unsigned long HIDSelector::baselineTiming = 0;   // Baseline timing measurement
 int HIDSelector::timingDriftCount = 0;           // Count of timing drift events
 bool HIDSelector::timingCompensationActive = false;  // Whether drift compensation is active
+
+// === DYNAMIC TIMING COMPENSATION ===
+unsigned long HIDSelector::accumulatedCompensation = 0; // Accumulated timing compensation to apply
 
 // Return true for the interface we want to hook into
 bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
@@ -603,6 +609,48 @@ void HIDSelector::setToggleForNextTransfer(uint8_t toggleState, const char* reas
 
 // Test LED command sequence with moving LED on rainbow background - OPTIMIZED FRAME CREATION
 void HIDSelector::testLEDCommands() {
+    int DELAYTIME = 902;
+    // === PER-PACKET TIMING COMPENSATION ===
+    // Track timing for each packet individually for more granular compensation
+    
+    // Packet timing targets and compensation tracking
+    static unsigned long lastPkg1Time = 0;
+    static unsigned long lastPkg2Time = 0;
+    static unsigned long lastActivationTime = 0;
+    static unsigned long pkg1Compensation = 0;
+    static unsigned long pkg2Compensation = 0;
+    static unsigned long activationCompensation = 0;
+    
+    // Target timing for each packet type
+    const unsigned long TARGET_PKG1_TIME = 1500;    // 1.5ms target for Package 1
+    const unsigned long TARGET_PKG2_TIME = 1500;    // 1.5ms target for Package 2
+    const unsigned long TARGET_ACTIVATION_TIME = 1800; // 1.8ms target for Activation
+    
+    // Apply compensation from previous cycle if available
+    if (lastPkg1Time > 0) {
+        if (lastPkg1Time > TARGET_PKG1_TIME) {
+            pkg1Compensation = min(lastPkg1Time - TARGET_PKG1_TIME, 500UL);
+        } else {
+            pkg1Compensation = 0;
+        }
+    }
+    
+    if (lastPkg2Time > 0) {
+        if (lastPkg2Time > TARGET_PKG2_TIME) {
+            pkg2Compensation = min(lastPkg2Time - TARGET_PKG2_TIME, 500UL);
+        } else {
+            pkg2Compensation = 0;
+        }
+    }
+    
+    if (lastActivationTime > 0) {
+        if (lastActivationTime > TARGET_ACTIVATION_TIME) {
+            activationCompensation = min(lastActivationTime - TARGET_ACTIVATION_TIME, 300UL);
+        } else {
+            activationCompensation = 0;
+        }
+    }
+    
     // === LONG-TERM STABILITY SYSTEM (20+ minutes) ===
     // Enable long-term stability mode if not already enabled
     // DISABLED: Drift correction logic removed as requested
@@ -814,7 +862,17 @@ void HIDSelector::testLEDCommands() {
     // CRITICAL: Don't use SOF sync for Package 1 - it causes >1000μs transfer times
     // Package 1 should be sent immediately for stable LED operation
     // waitForUSBFrameSync(); // REMOVED - causes Package 1 to take too long
-     delayMicroseconds(903);
+    
+    // Apply timing compensation to reduce delays when cycles are running long
+    unsigned long adjustedDelay = DELAYTIME;
+    if (pkg1Compensation > 0) {
+        adjustedDelay = (adjustedDelay > pkg1Compensation) ? adjustedDelay - pkg1Compensation : 0;
+        Serial.print(" [Pkg1 comp: -");
+        Serial.print(pkg1Compensation);
+        Serial.print("μs]");
+    }
+    delayMicroseconds(adjustedDelay);
+    
     // Send Package 1 with detailed logging
     rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
     unsigned long pkg1EndTime = micros();
@@ -825,6 +883,10 @@ void HIDSelector::testLEDCommands() {
     Serial.print(" (");
     Serial.print(pkg1Duration);
     Serial.print("μs)");
+    
+    // Store Package 1 timing for next cycle's compensation
+    lastPkg1Time = pkg1Duration;
+    
     if (rcode == 0) {
         Serial.print(" ✅ → ");
         //delayMicroseconds(2998); // Reduced from 200μs to prevent timing issues
@@ -1019,7 +1081,15 @@ void HIDSelector::testLEDCommands() {
     Serial.print(pkg1ToPkg2Gap);
     Serial.print("μs)... ");
     for (int retry = 0; retry < 3; retry++) {
-        delayMicroseconds(903);
+        // Apply timing compensation to reduce delays when cycles are running long
+        unsigned long adjustedDelay = DELAYTIME;
+        if (pkg2Compensation > 0) {
+            adjustedDelay = (adjustedDelay > pkg2Compensation) ? adjustedDelay - pkg2Compensation : 0;
+            Serial.print(" [Pkg2 comp: -");
+            Serial.print(pkg2Compensation);
+            Serial.print("μs]");
+        }
+        delayMicroseconds(adjustedDelay);
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         unsigned long pkg2EndTime = micros();
         unsigned long pkg2Duration = pkg2EndTime - pkg2StartTime;
@@ -1029,6 +1099,9 @@ void HIDSelector::testLEDCommands() {
         Serial.print(" (");
         Serial.print(pkg2Duration);
         Serial.print("μs)");
+        
+        // Store Package 2 timing for next cycle's compensation
+        lastPkg2Time = pkg2Duration;
         
         // Add Package 2 timing to drift monitoring
         // DISABLED: Drift correction logic removed as requested
@@ -1067,7 +1140,15 @@ void HIDSelector::testLEDCommands() {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, package1Backup);
         if (rcode == 0) {
             Serial.print("Pkg1 resent ✅ → ");
-            delayMicroseconds(903);
+            // Apply timing compensation to reduce delays when cycles are running long
+            unsigned long adjustedDelay = DELAYTIME;
+            if (pkg1Compensation > 0) {
+                adjustedDelay = (adjustedDelay > pkg1Compensation) ? adjustedDelay - pkg1Compensation : 0;
+                Serial.print(" [Pkg1 comp: -");
+                Serial.print(pkg1Compensation);
+                Serial.print("μs]");
+            }
+            delayMicroseconds(adjustedDelay);
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             if (rcode == 0) {
                 Serial.print("Pkg2 recovered ✅ → ");
@@ -1099,7 +1180,15 @@ void HIDSelector::testLEDCommands() {
     Serial.print(pkg2ToActivationGap);
     Serial.print("μs)... ");
     for (int retry = 0; retry < 5; retry++) {
-        delayMicroseconds(1903);
+        // Apply timing compensation to reduce delays when cycles are running long
+        unsigned long adjustedDelay = DELAYTIME;
+        if (activationCompensation > 0) {
+            adjustedDelay = (adjustedDelay > activationCompensation) ? adjustedDelay - activationCompensation : 0;
+            Serial.print(" [Act comp: -");
+            Serial.print(activationCompensation);
+            Serial.print("μs]");
+        }
+        delayMicroseconds(adjustedDelay);
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
         unsigned long activationEndTime = micros();
         unsigned long activationDuration = activationEndTime - activationStartTime;
@@ -1109,10 +1198,14 @@ void HIDSelector::testLEDCommands() {
         Serial.print(" (");
         Serial.print(activationDuration);
         Serial.print("μs)");
+        
+        // Store activation timing for next cycle's compensation
+        lastActivationTime = activationDuration;
+        
         if (rcode == 0) {
             // CRITICAL: Use minimal timing compensation to prevent >1000μs transfers
             // Device expects consistent timing for stable LED operation
-            const unsigned long TARGET_ACTIVATION_TIME = 180; // μs (reduced from 250μs)
+            const unsigned long TARGET_ACTIVATION_TIME = 100; // μs (reduced from 250μs)
             if (activationDuration < TARGET_ACTIVATION_TIME) {
                 unsigned long compensationDelay = TARGET_ACTIVATION_TIME - activationDuration;
                 //delayMicroseconds(compensationDelay);
@@ -1138,7 +1231,7 @@ void HIDSelector::testLEDCommands() {
         Serial.print(" (NAK, retry)");
         nakCount++; // Track NAK for rate monitoring
         hadNAK = true; // Flag for NAK smoothing
-        delayMicroseconds(50); // Reduced from 150μs to minimize timing disruption
+       // delayMicroseconds(50); // Reduced from 150μs to minimize timing disruption
     }
     
     if (rcode != 0) {
@@ -1146,6 +1239,15 @@ void HIDSelector::testLEDCommands() {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, package1Backup);
         if (rcode == 0) {
             Serial.print("Pkg1 resent ✅ → ");
+            // Apply timing compensation to reduce delays when cycles are running long
+            unsigned long adjustedDelay = DELAYTIME;
+            if (pkg1Compensation > 0) {
+                adjustedDelay = (adjustedDelay > pkg1Compensation) ? adjustedDelay - pkg1Compensation : 0;
+                Serial.print(" [Pkg1 comp: -");
+                Serial.print(pkg1Compensation);
+                Serial.print("μs]");
+            }
+            delayMicroseconds(adjustedDelay);
             rcode = pUsb->outTransfer(bAddress, 0x04, 64, cmd);
             if (rcode == 0) {
                 Serial.println("Activation recovered ✅");
@@ -1210,10 +1312,10 @@ void HIDSelector::testLEDCommands() {
     // === NAK SMOOTHING ===
     // If we had a NAK in the previous command, hold the LED state briefly
     // to prevent visible flickering during NAK recovery
-    if (hadNAK) {
-        delayMicroseconds(100); // Brief hold to smooth NAK recovery
-        hadNAK = false;
-    }
+    // if (hadNAK) {
+    //     delayMicroseconds(100); // Brief hold to smooth NAK recovery
+    //     hadNAK = false;
+    // }
     
     // === NAK RATE MONITORING ===
     totalCommands++;
@@ -1229,24 +1331,27 @@ void HIDSelector::testLEDCommands() {
     // === NAK SMOOTHING ===
     // If we had a NAK in the previous command, hold the LED state briefly
     // to prevent visible flickering during NAK recovery
-    if (hadNAK) {
-        delayMicroseconds(100); // Brief hold to smooth NAK recovery
-        hadNAK = false;
-    }
+    // if (hadNAK) {
+    //     delayMicroseconds(100); // Brief hold to smooth NAK recovery
+    //     hadNAK = false;
+    // }
     
     // === NAK SMOOTHING - COMPENSATE FOR TIMING DISRUPTION ===
     
     // If we had a NAK recently, add compensation to smooth the timing
-    if (lastNAKTime > 0 && (micros() - lastNAKTime) < 10000) { // Within 10ms of NAK
-        if (nakCompensationDelay > 0) {
-            delayMicroseconds(nakCompensationDelay);
-            Serial.print(" +NAK_comp:");
-            Serial.print(nakCompensationDelay);
-            nakCompensationDelay = 0; // Use it once
-        }
-    }
+    // if (lastNAKTime > 0 && (micros() - lastNAKTime) < 10000) { // Within 10ms of NAK
+    //     if (nakCompensationDelay > 0) {
+    //         delayMicroseconds(nakCompensationDelay);
+    //         Serial.print(" +NAK_comp:");
+    //         Serial.print(nakCompensationDelay);
+    //         nakCompensationDelay = 0; // Use it once
+    //     }
+    // }
     
     // === SIMPLIFIED APPROACH - MINIMAL TIMING DRIFT COMPENSATION ONLY ===
+    
+    // Calculate and store execution time for next cycle's compensation
+    // lastExecutionTime = micros() - executionStart; // REMOVED - now using per-packet timing
 }
 
 // Wait for USB frame synchronization - now uses actual SOF counter from MAX3421E
