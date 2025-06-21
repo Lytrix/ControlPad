@@ -44,7 +44,7 @@ public:
     void testLEDCommands(); // Optimized version
     bool waitForPacketEcho(const uint8_t* sentPacket, const char* packetName);
     
-    // CRITICAL: Disable automatic polling completely for MIDI timing
+    // CRITICAL: Disable automatic polling that causes periodic flickering
     void disableAutomaticPolling() {
         pollInterval = 0; // Disable automatic polling completely
         qNextPollTime = 0; // Reset poll timer
@@ -547,11 +547,11 @@ void HIDSelector::testLEDCommands() {
     
     // === FAST ANIMATION UPDATE ===
     static int movingLED = 0;
-    static unsigned long lastLEDMove = 0;
+    static elapsedMillis ledMoveTimer;
     
-    if (millis() - lastLEDMove > 150) {
+    if (ledMoveTimer >= 150) {
         movingLED = (movingLED + 1) % 24;
-        lastLEDMove = millis();
+        ledMoveTimer = 0;
     }
     
     // === FAST RGB DATA ASSIGNMENT USING DIRECT POINTER ACCESS ===
@@ -764,26 +764,24 @@ void HIDSelector::testLEDCommands() {
 // Wait for device echo to confirm packet was received and processed
 // Device should echo back the first 3 bytes of any command sent
 bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packetName) {
-    // Non-blocking echo detection using micros() for precise timing
+    // Non-blocking echo detection using elapsedMicros for precise timing
     // Based on USB capture: device responds in 1.5-1.9ms (1500-1900 microseconds)
     
-    unsigned long startTime = micros();
-    unsigned long lastPollTime = 0;
+    elapsedMicros totalTime;
+    elapsedMicros pollTime;
     
-    // Poll for up to 20ms (20000 microseconds) total timeout
-    while (micros() - startTime < 20000) {
-        // Only poll every 100μs for faster response
-        if (micros() - lastPollTime >= 100 || lastPollTime == 0) {
-            lastPollTime = micros();
+    // Poll for up to 5ms (5000 microseconds) total timeout
+    while (totalTime < 5000) {
+        // Only poll every 128μs for optimal response (power-of-2 aligned)
+        if (pollTime >= 128) {
+            pollTime = 0; // Reset poll timer
             
         uint16_t bytesRead = 64;
         uint8_t buffer[64];
         uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
         
         if (rcode == 0 && bytesRead > 0) {
-            // Check for echo in two possible formats:
-            // Format 1: Direct echo (Package 1): 56 83 00 ...
-            // Format 2: Prefixed echo (Package 2): FF AA 00 00 56 83 01 ...
+            // Check for echo in (Package 1): 56 83 00 ...
             
             bool foundEcho = false;
             
@@ -792,15 +790,6 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
                 buffer[0] == sentPacket[0] && 
                 buffer[1] == sentPacket[1] && 
                 buffer[2] == sentPacket[2]) {
-                foundEcho = true;
-            }
-            
-            // Check prefixed format (bytes 4-6) for FF AA prefixed responses
-            if (!foundEcho && bytesRead >= 7 && 
-                buffer[0] == 0xFF && buffer[1] == 0xAA && 
-                buffer[4] == sentPacket[0] && 
-                buffer[5] == sentPacket[1] && 
-                buffer[6] == sentPacket[2]) {
                 foundEcho = true;
             }
             
@@ -825,12 +814,9 @@ USB Usb;
 HIDSelector hidSelector(&Usb);
 
 // Global variables at the top
-unsigned long loopStartTime = 0;
 int buttonState = LOW;
-unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50;
 int timerAnimationCount = 0;
-unsigned long lastTimerTime = 0;
 
 // EP polling statistics
 static int epPollCount = 0;
@@ -868,8 +854,8 @@ void setup()
 
 void loop()
 {
-    static unsigned long loopStartTime = millis();
-    // Removed lastInterruptionCheck - no longer needed since pattern detection disabled
+    static elapsedMillis loopTimer;
+    // USB task needs frequent calls for device stability
     Usb.Task();
     
     // Initialize Interface 1 once device is ready and operational
@@ -887,7 +873,7 @@ void loop()
     if (hidSelector.isReady() && !interface1InitAttempted) {
         interface1InitAttempted = true;
         Serial.print("🚀 Device ready at T+");
-        Serial.print(millis() - loopStartTime);
+        Serial.print(loopTimer);
         Serial.println("ms! Initializing Interface 1 for LED control...");
          
         bool success = hidSelector.initializeInterface1();
@@ -900,11 +886,11 @@ void loop()
             Serial.println("💡 Animation: Moving white LED on rainbow background");
             Serial.println("🎯 Zero-maintenance mode - optimized for uninterrupted MIDI timing!");
             Serial.print("🕐 Animation started at T+");
-            Serial.print(millis() - loopStartTime);
+            Serial.print(loopTimer);
             Serial.println("ms");
         } else {
             Serial.print("❌ Interface 1 initialization failed at T+");
-            Serial.print(millis() - loopStartTime);
+            Serial.print(loopTimer);
             Serial.println("ms - SINGLE ATTEMPT ONLY (no retries to avoid timing disruption)");
             // NO RETRY - any retry mechanism causes periodic timing disruption
         }
@@ -917,15 +903,17 @@ void loop()
         
         // Add settling delay before first animation command
         static bool firstAnimationCommand = true;
-        static unsigned long animationStartTime = 0;
+        static elapsedMillis settlingTimer;
+        static bool settlingStarted = false;
         
         if (firstAnimationCommand) {
-            if (animationStartTime == 0) {
-                animationStartTime = millis();
+            if (!settlingStarted) {
+                settlingTimer = 0;
+                settlingStarted = true;
                 Serial.println("⏳ Device settling before first LED command...");
             }
             // REDUCED: Wait 100ms before first LED command (reduced from 500ms)
-            if (millis() - animationStartTime < 100) {
+            if (settlingTimer < 100) {
                 return; // Skip animation until settling period is complete
             }
             firstAnimationCommand = false;
@@ -933,16 +921,15 @@ void loop()
         }
         
         // Simple timer-based animation with proper FRAMEIRQ synchronization in LED commands
-        static unsigned long lastTimerAnimation = 0;
-        unsigned long nowMs = millis();
+        static elapsedMillis animationTimer;
         
         // ULTIMATE MINIMAL APPROACH: Zero interference strategy
         // ANY periodic operation, maintenance, or monitoring causes flickering
         // The device achieves maximum stability with ZERO background operations
         // For MIDI looper: Silent, maintenance-free operation is essential
         
-        if (nowMs - lastTimerAnimation >= 100) { // Keep 100ms timing for smooth animation
-            lastTimerAnimation = nowMs;
+        if (animationTimer >= 100) { // Keep 100ms timing for smooth animation
+            animationTimer = 0;
             animationCount++;
             animationCycleCount++;
             
@@ -964,12 +951,11 @@ void loop()
     
     // Poll Interface 1 endpoint 0x83 for additional data (frequent polling needed for ACKs!)
     // DISABLED: 100% failure rate shows EP 0x83 doesn't exist on this device
-    static unsigned long lastPoll = 0;
+    static elapsedMillis pollTimer;
     static bool pollingEnabled = false; // EP polling completely broken - 100% failure rate
     
-    if (pollingEnabled && millis() - lastPoll > 50 && hidSelector.isReady()) { // Poll every 100ms (reduced from 50ms)
-        unsigned long pollStartTime = millis();
-        lastPoll = pollStartTime;
+    if (pollingEnabled && pollTimer >= 50 && hidSelector.isReady()) { // Poll every 50ms
+        pollTimer = 0;
         
         uint8_t buf[64];
         uint16_t len = 64;
@@ -982,7 +968,7 @@ void loop()
             epPollErrors++;
         }
         
-        // Report EP polling statistics every 100 polls (~10 seconds)
+        // Report EP polling statistics every 100 polls (~5 seconds with 50ms intervals)
         if (epPollCount % 100 == 0) {
             Serial.print("📊 EP polling stats: ");
             Serial.print(epPollSuccesses);
@@ -990,18 +976,7 @@ void loop()
             Serial.print(epPollErrors);
             Serial.print(" errors, ");
             Serial.print((epPollSuccesses * 100.0) / epPollCount, 1);
-            Serial.print("% success rate at T+");
-            Serial.print(pollStartTime - loopStartTime);
-            Serial.println("ms");
-        }
-        
-        unsigned long pollDuration = millis() - pollStartTime;
-        if (pollDuration > 50) {
-            Serial.print("⚠️ Slow polling operation: ");
-            Serial.print(pollDuration);
-            Serial.print("ms at T+");
-            Serial.print(pollStartTime - loopStartTime);
-            Serial.println("ms");
+            Serial.println("% success rate");
         }
         
         if (rcode == 0 && len > 0) {
@@ -1017,9 +992,7 @@ void loop()
             if (hasData) {
                 Serial.print("📡 Interface 1 EP 0x83 (");
                 Serial.print(len);
-                Serial.print(" bytes) at T+");
-                Serial.print(pollStartTime - loopStartTime);
-                Serial.print("ms: ");
+                Serial.print(" bytes): ");
                 for (uint8_t i = 0; i < len && i < 16; i++) {
                     if (buf[i] < 0x10) Serial.print("0");
                     Serial.print(buf[i], HEX);
