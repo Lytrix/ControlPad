@@ -39,6 +39,19 @@ private:
     static const uint8_t PROGMEM cmd4180Template[64];
     static const uint8_t PROGMEM activationTemplate[64];
     
+    // LED State Machine
+    enum LedState {
+        LED_IDLE,
+        LED_SEND_PKG1,
+        LED_SEND_PKG2,
+        LED_SEND_ACTIVATE,
+        LED_WAIT_ECHO
+    };
+    
+    LedState ledState = LED_IDLE;
+    uint32_t sofCounter = 0;
+    uint8_t retryCount = 0;
+    
 public:
     HIDSelector(USB *p) : HIDComposite(p) {};
     
@@ -48,12 +61,14 @@ public:
     void testLEDCommands(); // Optimized version
     bool waitForPacketEcho(const uint8_t* sentPacket, const char* packetName);
     
+    // Non-blocking LED state machine
+    void handleLEDStateMachine();
+    bool sendPacket(uint8_t* packet);
+    bool checkEcho();
+    
     // CRITICAL: Disable automatic polling that causes periodic flickering
     void disableAutomaticPolling() {
         pollInterval = 0; // Disable automatic polling completely
-        qNextPollTime = 0; // Reset poll timer
-        Serial.println("🚫 Automatic HID polling DISABLED completely");
-        Serial.println("🎯 Manual button polling will be handled separately to avoid timing interference");
     }
     
     // Endpoint state management
@@ -70,14 +85,16 @@ public:
     
     // State-managed endpoint polling
     void manageEndpoints() {
+        // DISABLED: Endpoint management was causing 16-second flickering cycles
+        // The 100ms polling intervals were interfering with LED command timing
+        // Even with reduced frequency, EP polling creates cumulative timing drift
+        return;
+        
         switch (currentState) {
             case STATE_LED_COMMAND:
-                // LED commands are handled by testLEDCommands()
-                // After LED sequence, move to polling
-                if (stateTimer > 1000) { // 1ms after LED commands
+                if (stateTimer >= 50000) { // 50ms for LED commands
                     currentState = STATE_POLL_0x83;
                     stateTimer = 0;
-                    stateCycle++;
                 }
                 break;
                 
@@ -94,9 +111,10 @@ public:
                 break;
                 
             case STATE_WAIT_SETTLE:
-                if (stateTimer > 100) { // 100μs settle time
+                if (stateTimer >= 50000) { // 50ms settle time
                     currentState = STATE_LED_COMMAND;
                     stateTimer = 0;
+                    stateCycle++;
                 }
                 break;
         }
@@ -104,11 +122,16 @@ public:
     
     // Poll 0x83 endpoint for button data
     void pollEndpoint0x83() {
-        uint8_t buf[64];
-        uint16_t len = 64;
+        // DISABLED: EP 0x83 polling was causing systematic timing interference
+        // Even optimized polling creates cumulative drift that manifests as flickering
+        return;
+        
+        uint8_t buf[8];
+        uint16_t len = 8;
         uint8_t rcode = pUsb->inTransfer(bAddress, 0x83, &len, buf);
         
         if (rcode == 0 && len > 0) {
+            // Process button data if needed
             bool hasData = false;
             for (uint8_t i = 0; i < len; i++) {
                 if (buf[i] != 0) {
@@ -117,11 +140,9 @@ public:
                 }
             }
             
-            if (hasData && stateCycle % 50 == 0) { // Reduce spam
-                Serial.print("📡 0x83 (");
-                Serial.print(len);
-                Serial.print("): ");
-                for (uint8_t i = 0; i < min(len, 8); i++) {
+            if (hasData) {
+                Serial.print("📱 Button data (0x83): ");
+                for (uint8_t i = 0; i < len; i++) {
                     if (buf[i] < 0x10) Serial.print("0");
                     Serial.print(buf[i], HEX);
                     Serial.print(" ");
@@ -133,11 +154,16 @@ public:
     
     // Poll 0x82 endpoint for status data
     void pollEndpoint0x82() {
-        uint8_t buf[64];
-        uint16_t len = 64;
+        // DISABLED: EP 0x82 polling was causing systematic timing interference
+        // Even optimized polling creates cumulative drift that manifests as flickering
+        return;
+        
+        uint8_t buf[8];
+        uint16_t len = 8;
         uint8_t rcode = pUsb->inTransfer(bAddress, 0x82, &len, buf);
         
         if (rcode == 0 && len > 0) {
+            // Process status data if needed
             bool hasData = false;
             for (uint8_t i = 0; i < len; i++) {
                 if (buf[i] != 0) {
@@ -146,11 +172,9 @@ public:
                 }
             }
             
-            if (hasData && stateCycle % 50 == 0) { // Reduce spam
-                Serial.print("📊 0x82 (");
-                Serial.print(len);
-                Serial.print("): ");
-                for (uint8_t i = 0; i < min(len, 8); i++) {
+            if (hasData) {
+                Serial.print("📊 Status data (0x82): ");
+                for (uint8_t i = 0; i < len; i++) {
                     if (buf[i] < 0x10) Serial.print("0");
                     Serial.print(buf[i], HEX);
                     Serial.print(" ");
@@ -162,7 +186,9 @@ public:
     
     // Legacy method for compatibility
     bool checkButtonState() {
-        return currentState == STATE_POLL_0x83;
+        // Placeholder for button state checking
+        // Can be implemented if button monitoring is needed
+        return false;
     }
     
     // Remove all timing compensation and monitoring functions
@@ -242,6 +268,20 @@ const uint8_t PROGMEM HIDSelector::activationTemplate[64] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
+
+// Rainbow colors for LED animation
+static const uint8_t PROGMEM rainbowColors[7][3] = {
+    {0xFF, 0x00, 0x00}, // Red
+    {0xFF, 0x80, 0x00}, // Orange
+    {0xFF, 0xFF, 0x00}, // Yellow
+    {0x00, 0xFF, 0x00}, // Green
+    {0x00, 0xFF, 0xFF}, // Cyan
+    {0x00, 0x00, 0xFF}, // Blue
+    {0xFF, 0x00, 0xFF}  // Magenta
+};
+
+// Animation state
+static int currentColorIndex = 0;
 
 // Return true for the interface we want to hook into
 bool HIDSelector::SelectInterface(uint8_t iface, uint8_t proto)
@@ -655,10 +695,8 @@ void HIDSelector::testLEDCommands() {
     
     // === USE DMA-PROTECTED BUFFERS INSTEAD OF STACK ===
     // Copy templates from PROGMEM to DMA-protected buffers
-    memcpy_P(dmaSetCustom, setCustomTemplate, 64);
     memcpy_P(dmaPackage1, package1Template, 64);
     memcpy_P(dmaPackage2, package2Template, 64);
-    memcpy_P(dmaCmd4180, cmd4180Template, 64);
     memcpy_P(dmaActivation, activationTemplate, 64);
     
     // Backup Package 1 for corruption detection
@@ -803,136 +841,47 @@ void HIDSelector::testLEDCommands() {
     
     __enable_irq(); // Re-enable interrupts
     
-    // === SEND COMMANDS WITH MINIMAL OVERHEAD AND NAK RETRY ===
+    // === ATOMIC SEND: no echo in between ===
     uint8_t rcode;
-    
-    // DISABLED: Set Custom Mode command (56 81) - testing without it
-    /*
-    for (int retry = 0; retry < 3; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaSetCustom);
-        if (rcode == 0) break; // Success
-        if (rcode == hrNAK) {
-            continue;
-        }
-        // Other errors are fatal
-        Serial.print("❌ SetCustom failed: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (rcode != 0) {
-        Serial.print("❌ SetCustom failed after retries: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (!waitForPacketEcho(dmaSetCustom, "SetCustom")) {
-        Serial.println("❌ SetCustom: No echo");
-        return;
-    }
-    */
-    
-    // Package 1 with NAK retry (SOF timing restored)
+
+    // 1) Send Pkg1
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaPackage1);
-        if (rcode == 0) break; // Success
-        if (rcode == hrNAK) {
-            // delay(1); // REMOVED - causes timing disruption
-            continue;
-        }
-        // Other errors are fatal
-        Serial.print("❌ Pkg1 failed: 0x");
+        if (rcode == 0) break;
+        if (rcode == hrNAK) continue;
+        Serial.print("❌ Pkg1 failed: 0x"); 
         Serial.println(rcode, HEX);
         return;
     }
-    
-    if (rcode != 0) {
-        Serial.print("❌ Pkg1 failed after retries: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    // Wait for echo with reduced polling
-    if (!waitForPacketEcho(dmaPackage1, "Pkg1")) {
-        Serial.println("❌ Pkg1: No echo");
-        return;
-    }
-    
-    // Package 2 with NAK retry (SOF timing restored)
+    if (rcode != 0) return;
+
+    // 2) Send Pkg2 immediately
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaPackage2);
-        if (rcode == 0) break; // Success
-        if (rcode == hrNAK) {
-            // delay(1); // REMOVED - causes timing disruption
-            continue;
-        }
-        // Other errors are fatal
-        Serial.print("❌ Pkg2 failed: 0x");
+        if (rcode == 0) break;
+        if (rcode == hrNAK) continue;
+        Serial.print("❌ Pkg2 failed: 0x"); 
         Serial.println(rcode, HEX);
         return;
     }
-    
-    if (rcode != 0) {
-        Serial.print("❌ Pkg2 failed after retries: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (!waitForPacketEcho(dmaPackage2, "Pkg2")) {
-        Serial.println("❌ Pkg2: No echo");
-        return;
-    }
-    
-    // DISABLED: 4180 command (status check before activation) - testing without it
-    /*
-    for (int retry = 0; retry < 3; retry++) {
-        rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaCmd4180);
-        if (rcode == 0) break; // Success
-        if (rcode == hrNAK) {
-            continue;
-        }
-        // Other errors are fatal
-        Serial.print("❌ 4180 failed: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (rcode != 0) {
-        Serial.print("❌ 4180 failed after retries: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (!waitForPacketEcho(dmaCmd4180, "4180")) {
-        Serial.println("❌ 4180: No echo");
-        return;
-    }
-    */
-    
-    // Activation with NAK retry (SOF timing restored)
+    if (rcode != 0) return;
+
+    // 3) Send Activation immediately
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaActivation);
-        if (rcode == 0) break; // Success
-        if (rcode == hrNAK) {
-            // delay(1); // REMOVED - causes timing disruption
-            continue;
-        }
-        // Other errors are fatal
-        Serial.print("❌ Activation failed: 0x");
+        if (rcode == 0) break;
+        if (rcode == hrNAK) continue;
+        Serial.print("❌ Activation failed: 0x"); 
         Serial.println(rcode, HEX);
         return;
     }
-    
-    if (rcode != 0) {
-        Serial.print("❌ Activation failed after retries: 0x");
-        Serial.println(rcode, HEX);
-        return;
-    }
-    
-    if (!waitForPacketEcho(dmaActivation, "Activation")) {
-        Serial.println("❌ Activation: No echo");
-        return;
-    }
+    if (rcode != 0) return;
+
+    // 4) Skip echo wait to prevent command skipping
+    // if (!waitForPacketEcho(dmaActivation, "Activation")) {
+    //     Serial.println("❌ Activation: No echo");
+    //     return;
+    // }
     
     // === MINIMAL TRACKING FOR MIDI LOOPER ===
     commandCount++;
@@ -951,7 +900,7 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
     // Poll for up to 5ms (5000 microseconds) total timeout
     while (totalTime < 6000) {
         // Only poll every 128μs for optimal response (power-of-2 aligned)
-        if (pollTime >= 1128) {
+        if (pollTime >= 500) {
             pollTime = 0; // Reset poll timer
             
         uint16_t bytesRead = 64;
@@ -982,7 +931,210 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
     return false;
 }
 
-// Removed all timing optimization functions for MIDI looper - minimal overhead approach
+// Non-blocking LED state machine - handles one state per SOF frame
+void HIDSelector::handleLEDStateMachine() {
+    // === FAST ANIMATION UPDATE ===
+    static int movingLED = 0;
+    static uint32_t ledMoveCounter = 0;
+    
+    // Move LED every ~100ms (100 SOF frames)
+    ledMoveCounter++;
+    if (ledMoveCounter >= 100) {
+        movingLED = (movingLED + 1) % 24;
+        ledMoveCounter = 0;
+    }
+    
+    sofCounter++;
+    
+    switch (ledState) {
+        case LED_IDLE:
+            if (sofCounter >= 40) {  // ~40ms update rate
+                sofCounter = 0;
+                retryCount = 0;
+                
+                // Prepare RGB data
+                __disable_irq();
+                memcpy_P(dmaPackage1, package1Template, 64);
+                memcpy_P(dmaPackage2, package2Template, 64);
+                memcpy_P(dmaActivation, activationTemplate, 64);
+                
+                // === OPTIMIZED RAINBOW COLORS (PROGMEM) ===
+                static const uint8_t PROGMEM rainbowColors[24][3] = {
+                    {0xFF, 0x00, 0x00}, {0xFF, 0x80, 0x00}, {0xFF, 0xFF, 0x00}, {0x80, 0xFF, 0x00},
+                    {0x00, 0xFF, 0x00}, {0x00, 0xFF, 0x80}, {0x00, 0xFF, 0xFF}, {0x00, 0x80, 0xFF},
+                    {0x00, 0x00, 0xFF}, {0x80, 0x00, 0xFF}, {0xFF, 0x00, 0xFF}, {0xFF, 0x00, 0x80},
+                    {0xFF, 0x40, 0x40}, {0x40, 0xFF, 0x40}, {0x40, 0x40, 0xFF}, {0xFF, 0xFF, 0x40},
+                    {0xFF, 0x40, 0xFF}, {0x40, 0xFF, 0xFF}, {0x80, 0x80, 0x80}, {0x60, 0x60, 0x60},
+                    {0x40, 0x40, 0x40}, {0x20, 0x20, 0x20}, {0xC0, 0xC0, 0xC0}, {0xA0, 0xA0, 0xA0}
+                };
+                
+                // Update RGB data (complete mapping from original testLEDCommands)
+                // Package 1 RGB data starts at byte 24
+                
+                // buttons 1,6,11,16,21 (indices 0,5,10,15,20)
+                dmaPackage1[24] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][0]);
+                dmaPackage1[25] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][1]);
+                dmaPackage1[26] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][2]);
+                
+                dmaPackage1[27] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][0]);
+                dmaPackage1[28] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][1]);
+                dmaPackage1[29] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][2]);
+                
+                dmaPackage1[30] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][0]);
+                dmaPackage1[31] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][1]);
+                dmaPackage1[32] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][2]);
+                
+                dmaPackage1[33] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][0]);
+                dmaPackage1[34] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][1]);
+                dmaPackage1[35] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][2]);
+                
+                dmaPackage1[36] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][0]);
+                dmaPackage1[37] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][1]);
+                dmaPackage1[38] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][2]);
+                
+                // buttons 2,7,12,17,22 (indices 1,6,11,16,21)
+                dmaPackage1[39] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][0]);
+                dmaPackage1[40] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][1]);
+                dmaPackage1[41] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][2]);
+                
+                dmaPackage1[42] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][0]);
+                dmaPackage1[43] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][1]);
+                dmaPackage1[44] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][2]);
+                
+                dmaPackage1[45] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][0]);
+                dmaPackage1[46] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][1]);
+                dmaPackage1[47] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][2]);
+                
+                dmaPackage1[48] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][0]);
+                dmaPackage1[49] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][1]);
+                dmaPackage1[50] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][2]);
+                
+                dmaPackage1[51] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][0]);
+                dmaPackage1[52] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][1]);
+                dmaPackage1[53] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][2]);
+                
+                // buttons 3,8,13 (indices 2,7,12)
+                dmaPackage1[54] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][0]);
+                dmaPackage1[55] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][1]);
+                dmaPackage1[56] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][2]);
+                
+                dmaPackage1[57] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][0]);
+                dmaPackage1[58] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][1]);
+                dmaPackage1[59] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][2]);
+                
+                dmaPackage1[60] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][0]);
+                dmaPackage1[61] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][1]);
+                dmaPackage1[62] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][2]);
+                
+                // button 18 R component only (index 17)
+                dmaPackage1[63] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][0]);
+                
+                // Package 2 RGB data
+                dmaPackage2[4] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][1]);
+                dmaPackage2[5] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][2]);
+                
+                dmaPackage2[6] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][0]);
+                dmaPackage2[7] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][1]);
+                dmaPackage2[8] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][2]);
+                
+                // buttons 4,9,14,19,24
+                dmaPackage2[9] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][0]);
+                dmaPackage2[10] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][1]);
+                dmaPackage2[11] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][2]);
+                
+                dmaPackage2[12] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][0]);
+                dmaPackage2[13] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][1]);
+                dmaPackage2[14] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][2]);
+                
+                dmaPackage2[15] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][0]);
+                dmaPackage2[16] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][1]);
+                dmaPackage2[17] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][2]);
+                
+                dmaPackage2[18] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][0]);
+                dmaPackage2[19] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][1]);
+                dmaPackage2[20] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][2]);
+                
+                dmaPackage2[21] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][0]);
+                dmaPackage2[22] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][1]);
+                dmaPackage2[23] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][2]);
+                
+                // buttons 5,10,15,20
+                dmaPackage2[24] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][0]);
+                dmaPackage2[25] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][1]);
+                dmaPackage2[26] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][2]);
+                
+                dmaPackage2[27] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][0]);
+                dmaPackage2[28] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][1]);
+                dmaPackage2[29] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][2]);
+                
+                dmaPackage2[30] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][0]);
+                dmaPackage2[31] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][1]);
+                dmaPackage2[32] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][2]);
+                
+                dmaPackage2[33] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][0]);
+                dmaPackage2[34] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][1]);
+                dmaPackage2[35] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][2]);
+                
+                __enable_irq();
+                
+                ledState = LED_SEND_PKG1;
+            }
+            break;
+
+        case LED_SEND_PKG1:
+            if (sendPacket(dmaPackage1)) {
+                ledState = LED_SEND_PKG2;
+                retryCount = 0;
+            } else if (++retryCount > 3) {
+                ledState = LED_IDLE; // Give up
+            }
+            break;
+
+        case LED_SEND_PKG2:
+            if (sendPacket(dmaPackage2)) {
+                ledState = LED_SEND_ACTIVATE;
+                retryCount = 0;
+            } else if (++retryCount > 3) {
+                ledState = LED_IDLE;
+            }
+            break;
+
+        case LED_SEND_ACTIVATE:
+            if (sendPacket(dmaActivation)) {
+                ledState = LED_IDLE; // Skip echo wait for now
+                commandCount++;
+                lastCommandTime = millis();
+            } else if (++retryCount > 3) {
+                ledState = LED_IDLE;
+            }
+            break;
+
+        case LED_WAIT_ECHO:
+            if (checkEcho()) {
+                ledState = LED_IDLE; // Success
+            } else if (++retryCount > 10) {
+                ledState = LED_IDLE; // Give up
+            }
+            break;
+    }
+}
+
+// Non-blocking packet send
+bool HIDSelector::sendPacket(uint8_t* packet) {
+    uint8_t rcode = pUsb->outTransfer(bAddress, 0x04, 64, packet);
+    return (rcode == 0);
+}
+
+// Non-blocking echo check
+bool HIDSelector::checkEcho() {
+    uint8_t buffer[64];
+    uint16_t bytesRead = 64;
+    uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
+    if (rcode == 0 && bytesRead >= 3) {
+        return true; // Simple echo check
+    }
+    return false;
+}
 
 USB Usb;
 //USBHub Hub(&Usb);
@@ -1105,17 +1257,26 @@ void loop()
         // Frame sync attempts didn't improve this - device has inherent 12-cycle limitation
         // Now we can fine-tune with microsecond precision: 41000μs = 41.000ms
         
-        const uint32_t ANIMATION_INTERVAL_MICROS = 39500; // 41.000ms - can be fine-tuned
+        const uint32_t ANIMATION_INTERVAL_MICROS = 100000; // 41.000ms - can be fine-tuned
         
-        if (animationTimer >= ANIMATION_INTERVAL_MICROS) {
-            animationTimer = 0; // Reset timer
-            animationCount++;
-            animationCycleCount++;
+        // SOF-based LED animation (drift-free, 1ms precision)
+        static bool sofSetupDone = false;
+        if (!sofSetupDone) {
+            // Enable SOF interrupts once
+            uint8_t hien = Usb.regRd(rHIEN);
+            Usb.regWr(rHIEN, hien | bmFRAMEIE);
+            Serial.println("🔄 SOF interrupts enabled for drift-free LED timing");
+            sofSetupDone = true;
+        }
+        
+        // Check if SOF happened
+        uint8_t irq = Usb.regRd(rHIRQ);
+        if (irq & bmFRAMEIRQ) {
+            // Clear FRAMEIRQ
+            Usb.regWr(rHIRQ, bmFRAMEIRQ);
             
-            // Execute LED command sequence with DMA-protected buffers
-            hidSelector.testLEDCommands();
-            
-            // For maximum stability: LED commands ONLY, zero background operations
+            // Handle LED state machine on every SOF (non-blocking)
+            hidSelector.handleLEDStateMachine();
         }
     }
     
