@@ -25,14 +25,18 @@ private:
     // === DMA-PROTECTED COMMAND BUFFERS ===
     // Replace stack-based cmd[64] with DMA-protected static buffers
     // This prevents memory corruption from ParseHIDData interrupts
+    static uint8_t DMAMEM dmaSetCustom[64] __attribute__((aligned(32)));
     static uint8_t DMAMEM dmaPackage1[64] __attribute__((aligned(32)));
     static uint8_t DMAMEM dmaPackage2[64] __attribute__((aligned(32)));
+    static uint8_t DMAMEM dmaCmd4180[64] __attribute__((aligned(32)));
     static uint8_t DMAMEM dmaActivation[64] __attribute__((aligned(32)));
     static uint8_t DMAMEM dmaPackage1Backup[64] __attribute__((aligned(32))); // Backup for corruption recovery
     
     // Pre-built command templates (const to save RAM)
+    static const uint8_t PROGMEM setCustomTemplate[64];
     static const uint8_t PROGMEM package1Template[64];
     static const uint8_t PROGMEM package2Template[64];
+    static const uint8_t PROGMEM cmd4180Template[64];
     static const uint8_t PROGMEM activationTemplate[64];
     
 public:
@@ -52,12 +56,113 @@ public:
         Serial.println("🎯 Manual button polling will be handled separately to avoid timing interference");
     }
     
-    // Manual button polling when needed (non-interfering)
-    bool checkButtonState() {
+    // Endpoint state management
+    enum EndpointState {
+        STATE_LED_COMMAND,    // Sending 0x04 LED commands
+        STATE_POLL_0x83,      // Polling 0x83 for button data
+        STATE_POLL_0x82,      // Polling 0x82 for status data
+        STATE_WAIT_SETTLE     // Waiting between operations
+    };
+    
+    EndpointState currentState = STATE_LED_COMMAND;
+    elapsedMicros stateTimer;
+    uint8_t stateCycle = 0;
+    
+    // State-managed endpoint polling
+    void manageEndpoints() {
+        switch (currentState) {
+            case STATE_LED_COMMAND:
+                // LED commands are handled by testLEDCommands()
+                // After LED sequence, move to polling
+                if (stateTimer > 1000) { // 1ms after LED commands
+                    currentState = STATE_POLL_0x83;
+                    stateTimer = 0;
+                    stateCycle++;
+                }
+                break;
+                
+            case STATE_POLL_0x83:
+                pollEndpoint0x83();
+                currentState = STATE_POLL_0x82;
+                stateTimer = 0;
+                break;
+                
+            case STATE_POLL_0x82:
+                pollEndpoint0x82();
+                currentState = STATE_WAIT_SETTLE;
+                stateTimer = 0;
+                break;
+                
+            case STATE_WAIT_SETTLE:
+                if (stateTimer > 100) { // 100μs settle time
+                    currentState = STATE_LED_COMMAND;
+                    stateTimer = 0;
+                }
+                break;
+        }
+    }
+    
+    // Poll 0x83 endpoint for button data
+    void pollEndpoint0x83() {
         uint8_t buf[64];
         uint16_t len = 64;
         uint8_t rcode = pUsb->inTransfer(bAddress, 0x83, &len, buf);
-        return (rcode == 0 && len > 0);
+        
+        if (rcode == 0 && len > 0) {
+            bool hasData = false;
+            for (uint8_t i = 0; i < len; i++) {
+                if (buf[i] != 0) {
+                    hasData = true;
+                    break;
+                }
+            }
+            
+            if (hasData && stateCycle % 50 == 0) { // Reduce spam
+                Serial.print("📡 0x83 (");
+                Serial.print(len);
+                Serial.print("): ");
+                for (uint8_t i = 0; i < min(len, 8); i++) {
+                    if (buf[i] < 0x10) Serial.print("0");
+                    Serial.print(buf[i], HEX);
+                    Serial.print(" ");
+                }
+                Serial.println();
+            }
+        }
+    }
+    
+    // Poll 0x82 endpoint for status data
+    void pollEndpoint0x82() {
+        uint8_t buf[64];
+        uint16_t len = 64;
+        uint8_t rcode = pUsb->inTransfer(bAddress, 0x82, &len, buf);
+        
+        if (rcode == 0 && len > 0) {
+            bool hasData = false;
+            for (uint8_t i = 0; i < len; i++) {
+                if (buf[i] != 0) {
+                    hasData = true;
+                    break;
+                }
+            }
+            
+            if (hasData && stateCycle % 50 == 0) { // Reduce spam
+                Serial.print("📊 0x82 (");
+                Serial.print(len);
+                Serial.print("): ");
+                for (uint8_t i = 0; i < min(len, 8); i++) {
+                    if (buf[i] < 0x10) Serial.print("0");
+                    Serial.print(buf[i], HEX);
+                    Serial.print(" ");
+                }
+                Serial.println();
+            }
+        }
+    }
+    
+    // Legacy method for compatibility
+    bool checkButtonState() {
+        return currentState == STATE_POLL_0x83;
     }
     
     // Remove all timing compensation and monitoring functions
@@ -75,12 +180,25 @@ unsigned long HIDSelector::lastCommandTime = 0;
 int HIDSelector::commandCount = 0;
 
 // === DMA-PROTECTED COMMAND BUFFERS ===
+uint8_t DMAMEM HIDSelector::dmaSetCustom[64] __attribute__((aligned(32)));
 uint8_t DMAMEM HIDSelector::dmaPackage1[64] __attribute__((aligned(32)));
 uint8_t DMAMEM HIDSelector::dmaPackage2[64] __attribute__((aligned(32)));
+uint8_t DMAMEM HIDSelector::dmaCmd4180[64] __attribute__((aligned(32)));
 uint8_t DMAMEM HIDSelector::dmaActivation[64] __attribute__((aligned(32)));
 uint8_t DMAMEM HIDSelector::dmaPackage1Backup[64] __attribute__((aligned(32)));
 
 // Pre-built command templates in PROGMEM to save RAM
+const uint8_t PROGMEM HIDSelector::setCustomTemplate[64] = {
+    0x56, 0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0xbb, 0xbb, 0xbb, 0xbb,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 const uint8_t PROGMEM HIDSelector::package1Template[64] = {
     0x56, 0x83, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x80, 0x01, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00,
@@ -94,6 +212,17 @@ const uint8_t PROGMEM HIDSelector::package1Template[64] = {
 
 const uint8_t PROGMEM HIDSelector::package2Template[64] = {
     0x56, 0x83, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+const uint8_t PROGMEM HIDSelector::cmd4180Template[64] = {
+    0x41, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -526,8 +655,10 @@ void HIDSelector::testLEDCommands() {
     
     // === USE DMA-PROTECTED BUFFERS INSTEAD OF STACK ===
     // Copy templates from PROGMEM to DMA-protected buffers
+    memcpy_P(dmaSetCustom, setCustomTemplate, 64);
     memcpy_P(dmaPackage1, package1Template, 64);
     memcpy_P(dmaPackage2, package2Template, 64);
+    memcpy_P(dmaCmd4180, cmd4180Template, 64);
     memcpy_P(dmaActivation, activationTemplate, 64);
     
     // Backup Package 1 for corruption detection
@@ -547,9 +678,9 @@ void HIDSelector::testLEDCommands() {
     
     // === FAST ANIMATION UPDATE ===
     static int movingLED = 0;
-    static elapsedMillis ledMoveTimer;
+    static elapsedMicros ledMoveTimer;
     
-    if (ledMoveTimer >= 150) {
+    if (ledMoveTimer >= 100000) {
         movingLED = (movingLED + 1) % 24;
         ledMoveTimer = 0;
     }
@@ -675,8 +806,31 @@ void HIDSelector::testLEDCommands() {
     // === SEND COMMANDS WITH MINIMAL OVERHEAD AND NAK RETRY ===
     uint8_t rcode;
     
-    // Removed delay before Package 1 for zero-latency MIDI looper operation
-    // delayMicroseconds(500); // REMOVED - causes periodic timing disruption
+    // DISABLED: Set Custom Mode command (56 81) - testing without it
+    /*
+    for (int retry = 0; retry < 3; retry++) {
+        rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaSetCustom);
+        if (rcode == 0) break; // Success
+        if (rcode == hrNAK) {
+            continue;
+        }
+        // Other errors are fatal
+        Serial.print("❌ SetCustom failed: 0x");
+        Serial.println(rcode, HEX);
+        return;
+    }
+    
+    if (rcode != 0) {
+        Serial.print("❌ SetCustom failed after retries: 0x");
+        Serial.println(rcode, HEX);
+        return;
+    }
+    
+    if (!waitForPacketEcho(dmaSetCustom, "SetCustom")) {
+        Serial.println("❌ SetCustom: No echo");
+        return;
+    }
+    */
     
     // Package 1 with NAK retry (SOF timing restored)
     for (int retry = 0; retry < 3; retry++) {
@@ -697,8 +851,6 @@ void HIDSelector::testLEDCommands() {
         Serial.println(rcode, HEX);
         return;
     }
-    
-
     
     // Wait for echo with reduced polling
     if (!waitForPacketEcho(dmaPackage1, "Pkg1")) {
@@ -730,6 +882,32 @@ void HIDSelector::testLEDCommands() {
         Serial.println("❌ Pkg2: No echo");
         return;
     }
+    
+    // DISABLED: 4180 command (status check before activation) - testing without it
+    /*
+    for (int retry = 0; retry < 3; retry++) {
+        rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaCmd4180);
+        if (rcode == 0) break; // Success
+        if (rcode == hrNAK) {
+            continue;
+        }
+        // Other errors are fatal
+        Serial.print("❌ 4180 failed: 0x");
+        Serial.println(rcode, HEX);
+        return;
+    }
+    
+    if (rcode != 0) {
+        Serial.print("❌ 4180 failed after retries: 0x");
+        Serial.println(rcode, HEX);
+        return;
+    }
+    
+    if (!waitForPacketEcho(dmaCmd4180, "4180")) {
+        Serial.println("❌ 4180: No echo");
+        return;
+    }
+    */
     
     // Activation with NAK retry (SOF timing restored)
     for (int retry = 0; retry < 3; retry++) {
@@ -764,16 +942,16 @@ void HIDSelector::testLEDCommands() {
 // Wait for device echo to confirm packet was received and processed
 // Device should echo back the first 3 bytes of any command sent
 bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packetName) {
-    // Non-blocking echo detection using elapsedMicros for precise timing
+    // MICROSECOND PRECISION: Use elapsedMicros for precise timing
     // Based on USB capture: device responds in 1.5-1.9ms (1500-1900 microseconds)
     
     elapsedMicros totalTime;
     elapsedMicros pollTime;
     
     // Poll for up to 5ms (5000 microseconds) total timeout
-    while (totalTime < 5000) {
+    while (totalTime < 6000) {
         // Only poll every 128μs for optimal response (power-of-2 aligned)
-        if (pollTime >= 128) {
+        if (pollTime >= 1128) {
             pollTime = 0; // Reset poll timer
             
         uint16_t bytesRead = 64;
@@ -795,15 +973,12 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
             
             if (foundEcho) {
                 return true; // Found expected echo
-                }
             }
         }
-        
-        // Allow other operations to continue while waiting
-        // Microsecond timing provides much finer control and avoids millis() alignment issues
+        }
     }
     
-    // Timeout - no echo received after 20ms
+    // Timeout - no echo received after 5ms
     return false;
 }
 
@@ -903,7 +1078,7 @@ void loop()
         
         // Add settling delay before first animation command
         static bool firstAnimationCommand = true;
-        static elapsedMillis settlingTimer;
+        static elapsedMicros settlingTimer;
         static bool settlingStarted = false;
         
         if (firstAnimationCommand) {
@@ -912,40 +1087,35 @@ void loop()
                 settlingStarted = true;
                 Serial.println("⏳ Device settling before first LED command...");
             }
-            // REDUCED: Wait 100ms before first LED command (reduced from 500ms)
-            if (settlingTimer < 100) {
+            // Wait 1000ms (1,000,000μs) before first LED command
+            if (settlingTimer < 1000000) {
                 return; // Skip animation until settling period is complete
             }
             firstAnimationCommand = false;
             Serial.println("✅ Device settled - starting LED animation");
         }
         
-        // Simple timer-based animation with proper FRAMEIRQ synchronization in LED commands
-        static elapsedMillis animationTimer;
+        // BACK TO BASICS: Simple 41ms timing that was giving consistent 12-update cycles
+        // MICROSECOND PRECISION: Use elapsedMicros for fine-tuning the optimal cadence
+        // This allows testing values like 40500μs, 41200μs, etc. to optimize flickering
         
-        // ULTIMATE MINIMAL APPROACH: Zero interference strategy
-        // ANY periodic operation, maintenance, or monitoring causes flickering
-        // The device achieves maximum stability with ZERO background operations
-        // For MIDI looper: Silent, maintenance-free operation is essential
+        static elapsedMicros animationTimer;
         
-        if (animationTimer >= 100) { // Keep 100ms timing for smooth animation
-            animationTimer = 0;
+        // OPTIMAL TIMING: 41ms gives cleanest pattern (consistent 12-update cycles with 0.8s flickering)
+        // Frame sync attempts didn't improve this - device has inherent 12-cycle limitation
+        // Now we can fine-tune with microsecond precision: 41000μs = 41.000ms
+        
+        const uint32_t ANIMATION_INTERVAL_MICROS = 39500; // 41.000ms - can be fine-tuned
+        
+        if (animationTimer >= ANIMATION_INTERVAL_MICROS) {
+            animationTimer = 0; // Reset timer
             animationCount++;
             animationCycleCount++;
-            
-            // REMOVED: All periodic serial output causes timing disruptions
-            // Even printing every 500 cycles interferes with USB timing
-            // For MIDI looper, silent operation is essential
             
             // Execute LED command sequence with DMA-protected buffers
             hidSelector.testLEDCommands();
             
-            // DISABLED: Manual button polling to eliminate all periodic USB operations
-            // This completely removes any 1-second periodic interference
-            // if (animationCount % 10 == 0) {
-            //     hidSelector.checkButtonState(); // Check for button presses without storing result
-            //     // Button handling can be added here when needed
-            // }
+            // For maximum stability: LED commands ONLY, zero background operations
         }
     }
     
