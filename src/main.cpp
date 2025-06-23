@@ -1054,8 +1054,23 @@ void HIDSelector::handleLEDStateMachine() {
             }
        break;
 
+        case LED_SEND_WAIT_ONE_SOF:   
+            // Wait 2 SOF frames (2ms) for optimal timing
+            static uint32_t waitStartSof = 0;
+            if (waitStartSof == 0) {
+                waitStartSof = sofCount;
+            }
+            if ((sofCount - waitStartSof) >= 6) {
+                waitStartSof = 0; // Reset for next time
+                ledState = LED_SEND_CMD4180;
+            }
+            commandCount++;
+            lastCommandTime = millis();
+            //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");     
+            break;
+
         case LED_SEND_CMD4180:
-            delayMicroseconds(500);
+            //delayMicroseconds(500);
             if (sendPacket(dmaCmd4180)) {
                 ledState = LED_SEND_ACTIVATE;
                 commandCount++;
@@ -1064,16 +1079,8 @@ void HIDSelector::handleLEDStateMachine() {
             }
             break;
 
-        case LED_SEND_WAIT_ONE_SOF:   
-            //delayMicroseconds(1000);
-            ledState = LED_SEND_CMD4180;
-            commandCount++;
-            lastCommandTime = millis();
-            //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
-        
-            break;
         case LED_SEND_ACTIVATE:
-        delayMicroseconds(500);
+        //delayMicroseconds(500);
             //delayMicroseconds(1000);
             if (sendPacket(dmaActivation)) {
                 ledState = LED_IDLE;
