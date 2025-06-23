@@ -959,7 +959,7 @@ void HIDSelector::handleLEDStateMachine() {
     }
     
     // This runs every SOF - spread packets across multiple SOF frames
-    const uint32_t LED_PERIOD = 40; // Try 31, 32, 33 to find sweet spot
+    const uint32_t LED_PERIOD = 20; // Try 31, 32, 33 to find sweet spot
 
     switch (ledState) {
         case LED_IDLE:
@@ -969,9 +969,9 @@ void HIDSelector::handleLEDStateMachine() {
             static uint32_t totalCycleCount = 0;
             static bool echoesStillActive = true;
             static uint32_t lastEchoAtCycle = 0;
-            
+            static uint32_t lastKeepAliveTime = 0;
             totalCycleCount++;
-            
+
             // if (echoTimer < 10000) {  // Poll for 10ms during idle (extended window)
             //     if (echoTimer2 >= 64) {  // Every 64μs (higher frequency)
             //         echoTimer2 = 0;
