@@ -962,7 +962,7 @@ void HIDSelector::handleLEDStateMachine() {
     }
     
     // This runs every SOF - spread packets across multiple SOF frames
-    const uint32_t LED_PERIOD = 40; // Try 31, 32, 33 to find sweet spot
+    const uint32_t LED_PERIOD = 20; // Try 31, 32, 33 to find sweet spot
 
     switch (ledState) {
         case LED_IDLE:
@@ -1039,6 +1039,7 @@ void HIDSelector::handleLEDStateMachine() {
         //     break;
             
         case LED_SEND_PKG1:
+            delayMicroseconds(750);
             if (sendPacket(dmaPackage1)) {
                 ledState = LED_SEND_PKG2;
                // Serial.println("📦 PKG1: Sent - proceeding to PKG2 (SOF timing)");
@@ -1046,8 +1047,9 @@ void HIDSelector::handleLEDStateMachine() {
             break;
 
         case LED_SEND_PKG2:
+            delayMicroseconds(750);
             if (sendPacket(dmaPackage2)) {        
-                ledState = LED_SEND_WAIT_ONE_SOF;
+                ledState = LED_SEND_ACTIVATE;
 ;
               //  Serial.println("📦 PKG2: Sent - proceeding to CMD4180 (SOF timing)");
             }
@@ -1063,15 +1065,16 @@ void HIDSelector::handleLEDStateMachine() {
         //     }
         //     break;
 
-        case LED_SEND_WAIT_ONE_SOF:    
-                ledState = LED_SEND_ACTIVATE;
-                commandCount++;
-                lastCommandTime = millis();
-                //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
-            
+        case LED_SEND_WAIT_ONE_SOF:   
+            delayMicroseconds(750);
+            ledState = LED_SEND_ACTIVATE;
+            commandCount++;
+            lastCommandTime = millis();
+            //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
+        
             break;
         case LED_SEND_ACTIVATE:
-            delayMicroseconds(250);
+            delayMicroseconds(750);
             if (sendPacket(dmaActivation)) {
                 ledState = LED_IDLE;
                 commandCount++;
