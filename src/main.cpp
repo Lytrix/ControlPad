@@ -39,18 +39,18 @@ private:
     static const uint8_t PROGMEM cmd4180Template[64];
     static const uint8_t PROGMEM activationTemplate[64];
     
-    // LED State Machine
+    // LED State Machine - SOF-aligned pacing
     enum LedState {
         LED_IDLE,
         LED_SEND_PKG1,
         LED_SEND_PKG2,
-        LED_SEND_ACTIVATE,
-        LED_WAIT_ECHO
+        LED_SEND_CMD4180,
+        LED_SEND_ACTIVATE
     };
     
     LedState ledState = LED_IDLE;
-    uint32_t sofCounter = 0;
-    uint8_t retryCount = 0;
+    volatile uint32_t sofCount = 0;
+    uint32_t lastUpdateSof = 0;
     
 public:
     HIDSelector(USB *p) : HIDComposite(p) {};
@@ -63,6 +63,7 @@ public:
     
     // Non-blocking LED state machine
     void handleLEDStateMachine();
+    void prepareRGBData(int movingLED);
     bool sendPacket(uint8_t* packet);
     bool checkEcho();
     
@@ -866,6 +867,7 @@ void HIDSelector::testLEDCommands() {
     }
     if (rcode != 0) return;
 
+
     // 3) Send Activation immediately
     for (int retry = 0; retry < 3; retry++) {
         rcode = pUsb->outTransfer(bAddress, 0x04, 64, dmaActivation);
@@ -877,12 +879,14 @@ void HIDSelector::testLEDCommands() {
     }
     if (rcode != 0) return;
 
-    // 4) Skip echo wait to prevent command skipping
-    // if (!waitForPacketEcho(dmaActivation, "Activation")) {
-    //     Serial.println("❌ Activation: No echo");
-    //     return;
-    // }
-    
+    //4) Skip echo wait to prevent command skipping
+    if (!waitForPacketEcho(dmaActivation, "Activation")) {
+        Serial.println("❌ Activation: No echo");
+        return;
+    } else {
+        Serial.println("✅ Activation: Echo received");
+    }
+
     // === MINIMAL TRACKING FOR MIDI LOOPER ===
     commandCount++;
     lastCommandTime = millis();
@@ -900,13 +904,20 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
     // Poll for up to 5ms (5000 microseconds) total timeout
     while (totalTime < 6000) {
         // Only poll every 128μs for optimal response (power-of-2 aligned)
-        if (pollTime >= 500) {
+        if (pollTime >= 128) {
             pollTime = 0; // Reset poll timer
             
         uint16_t bytesRead = 64;
         uint8_t buffer[64];
         uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
-        
+                    Serial.print(buffer[0]);
+            Serial.print(buffer[1]);
+            Serial.print(buffer[2]);
+            Serial.print(buffer[3]);
+            Serial.print(buffer[4]);
+            Serial.print(buffer[5]);
+            Serial.print(buffer[6]);
+            Serial.println(buffer[7]);
         if (rcode == 0 && bytesRead > 0) {
             // Check for echo in (Package 1): 56 83 00 ...
             
@@ -931,8 +942,11 @@ bool HIDSelector::waitForPacketEcho(const uint8_t* sentPacket, const char* packe
     return false;
 }
 
-// Non-blocking LED state machine - handles one state per SOF frame
+// SOF-aligned LED state machine - one step per SOF frame
 void HIDSelector::handleLEDStateMachine() {
+    // Increment SOF counter
+    sofCount++;
+    
     // === FAST ANIMATION UPDATE ===
     static int movingLED = 0;
     static uint32_t ledMoveCounter = 0;
@@ -944,138 +958,71 @@ void HIDSelector::handleLEDStateMachine() {
         ledMoveCounter = 0;
     }
     
-    sofCounter++;
-    
+    // This runs every SOF - spread packets across multiple SOF frames
+    const uint32_t LED_PERIOD = 40; // Try 31, 32, 33 to find sweet spot
+
     switch (ledState) {
         case LED_IDLE:
-            if (sofCounter >= 40) {  // ~40ms update rate
-                sofCounter = 0;
-                retryCount = 0;
+            // Echo transition analysis - track when echoes stop
+            static elapsedMicros echoTimer;
+            static elapsedMicros echoTimer2;
+            static uint32_t totalCycleCount = 0;
+            static bool echoesStillActive = true;
+            static uint32_t lastEchoAtCycle = 0;
+            
+            totalCycleCount++;
+            
+            // if (echoTimer < 10000) {  // Poll for 10ms during idle (extended window)
+            //     if (echoTimer2 >= 64) {  // Every 64μs (higher frequency)
+            //         echoTimer2 = 0;
+                    
+            //         uint8_t buffer[64];
+            //         uint16_t bytesRead = 64;
+            //         uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
+                    
+            //         if (rcode == 0 && bytesRead >= 2) {
+            //             // Check for ANY known echo pattern
+            //             if ((buffer[0] == 0x51 && buffer[1] == 0x28) ||  // Activation
+            //                 (buffer[0] == 0x41 && buffer[1] == 0x80) ||  // CMD4180
+            //                 (buffer[0] == 0x56 && buffer[1] == 0x83)) {  // Package echoes
+                            
+            //                 Serial.print("📡 CYCLE#"); 
+            //                 Serial.print(totalCycleCount);
+            //                 Serial.print(" Echo at T+"); 
+            //                 Serial.print(echoTimer); 
+            //                 Serial.print("μs: ");
+            //                 Serial.print(buffer[0], HEX);
+            //                 Serial.print(" ");
+            //                 Serial.print(buffer[1], HEX);
+            //                 Serial.print(" (bytes: ");
+            //                 for(int i = 0; i < min(8, (int)bytesRead); i++) {
+            //                     if(buffer[i] < 0x10) Serial.print("0");
+            //                     Serial.print(buffer[i], HEX);
+            //                     Serial.print(" ");
+            //                 }
+            //                 Serial.println(")");
+                            
+            //                 lastEchoAtCycle = totalCycleCount;
+            //                 echoesStillActive = true;
+            //             }
+            //         }
+            //     }
+            // } else {
+            //     echoTimer = 0; // Reset for next idle cycle
                 
-                // Prepare RGB data
-                __disable_irq();
-                memcpy_P(dmaPackage1, package1Template, 64);
-                memcpy_P(dmaPackage2, package2Template, 64);
-                memcpy_P(dmaActivation, activationTemplate, 64);
+            //     // Check for echo silence transition
+            //     if (echoesStillActive && (totalCycleCount - lastEchoAtCycle) > 10) {
+            //         Serial.print("⚠️  ECHO SILENCE: No echoes for 10 cycles since cycle #");
+            //         Serial.println(lastEchoAtCycle);
+            //         echoesStillActive = false;
+            //     }
+            // }
+            
+            if ((sofCount - lastUpdateSof) >= LED_PERIOD) {
+                lastUpdateSof = sofCount;
                 
-                // === OPTIMIZED RAINBOW COLORS (PROGMEM) ===
-                static const uint8_t PROGMEM rainbowColors[24][3] = {
-                    {0xFF, 0x00, 0x00}, {0xFF, 0x80, 0x00}, {0xFF, 0xFF, 0x00}, {0x80, 0xFF, 0x00},
-                    {0x00, 0xFF, 0x00}, {0x00, 0xFF, 0x80}, {0x00, 0xFF, 0xFF}, {0x00, 0x80, 0xFF},
-                    {0x00, 0x00, 0xFF}, {0x80, 0x00, 0xFF}, {0xFF, 0x00, 0xFF}, {0xFF, 0x00, 0x80},
-                    {0xFF, 0x40, 0x40}, {0x40, 0xFF, 0x40}, {0x40, 0x40, 0xFF}, {0xFF, 0xFF, 0x40},
-                    {0xFF, 0x40, 0xFF}, {0x40, 0xFF, 0xFF}, {0x80, 0x80, 0x80}, {0x60, 0x60, 0x60},
-                    {0x40, 0x40, 0x40}, {0x20, 0x20, 0x20}, {0xC0, 0xC0, 0xC0}, {0xA0, 0xA0, 0xA0}
-                };
-                
-                // Update RGB data (complete mapping from original testLEDCommands)
-                // Package 1 RGB data starts at byte 24
-                
-                // buttons 1,6,11,16,21 (indices 0,5,10,15,20)
-                dmaPackage1[24] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][0]);
-                dmaPackage1[25] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][1]);
-                dmaPackage1[26] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][2]);
-                
-                dmaPackage1[27] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][0]);
-                dmaPackage1[28] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][1]);
-                dmaPackage1[29] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][2]);
-                
-                dmaPackage1[30] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][0]);
-                dmaPackage1[31] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][1]);
-                dmaPackage1[32] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][2]);
-                
-                dmaPackage1[33] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][0]);
-                dmaPackage1[34] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][1]);
-                dmaPackage1[35] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][2]);
-                
-                dmaPackage1[36] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][0]);
-                dmaPackage1[37] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][1]);
-                dmaPackage1[38] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][2]);
-                
-                // buttons 2,7,12,17,22 (indices 1,6,11,16,21)
-                dmaPackage1[39] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][0]);
-                dmaPackage1[40] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][1]);
-                dmaPackage1[41] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][2]);
-                
-                dmaPackage1[42] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][0]);
-                dmaPackage1[43] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][1]);
-                dmaPackage1[44] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][2]);
-                
-                dmaPackage1[45] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][0]);
-                dmaPackage1[46] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][1]);
-                dmaPackage1[47] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][2]);
-                
-                dmaPackage1[48] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][0]);
-                dmaPackage1[49] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][1]);
-                dmaPackage1[50] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][2]);
-                
-                dmaPackage1[51] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][0]);
-                dmaPackage1[52] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][1]);
-                dmaPackage1[53] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][2]);
-                
-                // buttons 3,8,13 (indices 2,7,12)
-                dmaPackage1[54] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][0]);
-                dmaPackage1[55] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][1]);
-                dmaPackage1[56] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][2]);
-                
-                dmaPackage1[57] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][0]);
-                dmaPackage1[58] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][1]);
-                dmaPackage1[59] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][2]);
-                
-                dmaPackage1[60] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][0]);
-                dmaPackage1[61] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][1]);
-                dmaPackage1[62] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][2]);
-                
-                // button 18 R component only (index 17)
-                dmaPackage1[63] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][0]);
-                
-                // Package 2 RGB data
-                dmaPackage2[4] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][1]);
-                dmaPackage2[5] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][2]);
-                
-                dmaPackage2[6] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][0]);
-                dmaPackage2[7] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][1]);
-                dmaPackage2[8] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][2]);
-                
-                // buttons 4,9,14,19,24
-                dmaPackage2[9] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][0]);
-                dmaPackage2[10] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][1]);
-                dmaPackage2[11] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][2]);
-                
-                dmaPackage2[12] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][0]);
-                dmaPackage2[13] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][1]);
-                dmaPackage2[14] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][2]);
-                
-                dmaPackage2[15] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][0]);
-                dmaPackage2[16] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][1]);
-                dmaPackage2[17] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][2]);
-                
-                dmaPackage2[18] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][0]);
-                dmaPackage2[19] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][1]);
-                dmaPackage2[20] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][2]);
-                
-                dmaPackage2[21] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][0]);
-                dmaPackage2[22] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][1]);
-                dmaPackage2[23] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][2]);
-                
-                // buttons 5,10,15,20
-                dmaPackage2[24] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][0]);
-                dmaPackage2[25] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][1]);
-                dmaPackage2[26] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][2]);
-                
-                dmaPackage2[27] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][0]);
-                dmaPackage2[28] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][1]);
-                dmaPackage2[29] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][2]);
-                
-                dmaPackage2[30] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][0]);
-                dmaPackage2[31] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][1]);
-                dmaPackage2[32] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][2]);
-                
-                dmaPackage2[33] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][0]);
-                dmaPackage2[34] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][1]);
-                dmaPackage2[35] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][2]);
-                
-                __enable_irq();
+                // Prepare RGB data for current moving LED
+                prepareRGBData(movingLED);
                 
                 ledState = LED_SEND_PKG1;
             }
@@ -1084,52 +1031,186 @@ void HIDSelector::handleLEDStateMachine() {
         case LED_SEND_PKG1:
             if (sendPacket(dmaPackage1)) {
                 ledState = LED_SEND_PKG2;
-                retryCount = 0;
-            } else if (++retryCount > 3) {
-                ledState = LED_IDLE; // Give up
+               //  Serial.println("📦 PKG1: Sent - proceeding to PKG2 (SOF timing)");
             }
             break;
+            
+
 
         case LED_SEND_PKG2:
             if (sendPacket(dmaPackage2)) {
                 ledState = LED_SEND_ACTIVATE;
-                retryCount = 0;
-            } else if (++retryCount > 3) {
-                ledState = LED_IDLE;
+                // Serial.println("📦 PKG2: Sent - proceeding to CMD4180 (SOF timing)");
             }
             break;
+            
 
+
+        // case LED_SEND_CMD4180:
+        //     if (sendPacket(dmaCmd4180)) {
+        //         delayMicroseconds(10);
+        //         ledState = LED_SEND_ACTIVATE;
+        //         commandCount++;
+        //         lastCommandTime = millis();
+        //         Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
+        //     }
+        //     break;
         case LED_SEND_ACTIVATE:
             if (sendPacket(dmaActivation)) {
-                ledState = LED_IDLE; // Skip echo wait for now
+                ledState = LED_IDLE;
                 commandCount++;
                 lastCommandTime = millis();
-            } else if (++retryCount > 3) {
-                ledState = LED_IDLE;
-            }
-            break;
-
-        case LED_WAIT_ECHO:
-            if (checkEcho()) {
-                ledState = LED_IDLE; // Success
-            } else if (++retryCount > 10) {
-                ledState = LED_IDLE; // Give up
+                
+                // Pure SOF timing - no hardware resets or nudges needed
+                // Serial.println("🎯 ACTIVATION: Sent - will check echo during next idle");
             }
             break;
     }
 }
 
-// Non-blocking packet send
+// Prepare RGB data for LED animation
+void HIDSelector::prepareRGBData(int movingLED) {
+    // Prepare RGB data
+    __disable_irq();
+    memcpy_P(dmaPackage1, package1Template, 64);
+    memcpy_P(dmaPackage2, package2Template, 64);
+    memcpy_P(dmaCmd4180, cmd4180Template, 64);
+    memcpy_P(dmaActivation, activationTemplate, 64);
+    
+    // === OPTIMIZED RAINBOW COLORS (PROGMEM) ===
+    static const uint8_t PROGMEM rainbowColors[24][3] = {
+        {0xFF, 0x00, 0x00}, {0xFF, 0x80, 0x00}, {0xFF, 0xFF, 0x00}, {0x80, 0xFF, 0x00},
+        {0x00, 0xFF, 0x00}, {0x00, 0xFF, 0x80}, {0x00, 0xFF, 0xFF}, {0x00, 0x80, 0xFF},
+        {0x00, 0x00, 0xFF}, {0x80, 0x00, 0xFF}, {0xFF, 0x00, 0xFF}, {0xFF, 0x00, 0x80},
+        {0xFF, 0x40, 0x40}, {0x40, 0xFF, 0x40}, {0x40, 0x40, 0xFF}, {0xFF, 0xFF, 0x40},
+        {0xFF, 0x40, 0xFF}, {0x40, 0xFF, 0xFF}, {0x80, 0x80, 0x80}, {0x60, 0x60, 0x60},
+        {0x40, 0x40, 0x40}, {0x20, 0x20, 0x20}, {0xC0, 0xC0, 0xC0}, {0xA0, 0xA0, 0xA0}
+    };
+    
+    // Update RGB data (complete mapping from original testLEDCommands)
+    // Package 1 RGB data starts at byte 24
+    
+    // buttons 1,6,11,16,21 (indices 0,5,10,15,20)
+    dmaPackage1[24] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][0]);
+    dmaPackage1[25] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][1]);
+    dmaPackage1[26] = (movingLED == 0) ? 0xFF : pgm_read_byte(&rainbowColors[0][2]);
+    
+    dmaPackage1[27] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][0]);
+    dmaPackage1[28] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][1]);
+    dmaPackage1[29] = (movingLED == 5) ? 0xFF : pgm_read_byte(&rainbowColors[5][2]);
+    
+    dmaPackage1[30] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][0]);
+    dmaPackage1[31] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][1]);
+    dmaPackage1[32] = (movingLED == 10) ? 0xFF : pgm_read_byte(&rainbowColors[10][2]);
+    
+    dmaPackage1[33] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][0]);
+    dmaPackage1[34] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][1]);
+    dmaPackage1[35] = (movingLED == 15) ? 0xFF : pgm_read_byte(&rainbowColors[15][2]);
+    
+    dmaPackage1[36] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][0]);
+    dmaPackage1[37] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][1]);
+    dmaPackage1[38] = (movingLED == 20) ? 0xFF : pgm_read_byte(&rainbowColors[20][2]);
+    
+    // buttons 2,7,12,17,22 (indices 1,6,11,16,21)
+    dmaPackage1[39] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][0]);
+    dmaPackage1[40] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][1]);
+    dmaPackage1[41] = (movingLED == 1) ? 0xFF : pgm_read_byte(&rainbowColors[1][2]);
+    
+    dmaPackage1[42] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][0]);
+    dmaPackage1[43] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][1]);
+    dmaPackage1[44] = (movingLED == 6) ? 0xFF : pgm_read_byte(&rainbowColors[6][2]);
+    
+    dmaPackage1[45] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][0]);
+    dmaPackage1[46] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][1]);
+    dmaPackage1[47] = (movingLED == 11) ? 0xFF : pgm_read_byte(&rainbowColors[11][2]);
+    
+    dmaPackage1[48] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][0]);
+    dmaPackage1[49] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][1]);
+    dmaPackage1[50] = (movingLED == 16) ? 0xFF : pgm_read_byte(&rainbowColors[16][2]);
+    
+    dmaPackage1[51] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][0]);
+    dmaPackage1[52] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][1]);
+    dmaPackage1[53] = (movingLED == 21) ? 0xFF : pgm_read_byte(&rainbowColors[21][2]);
+    
+    // buttons 3,8,13 (indices 2,7,12)
+    dmaPackage1[54] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][0]);
+    dmaPackage1[55] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][1]);
+    dmaPackage1[56] = (movingLED == 2) ? 0xFF : pgm_read_byte(&rainbowColors[2][2]);
+    
+    dmaPackage1[57] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][0]);
+    dmaPackage1[58] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][1]);
+    dmaPackage1[59] = (movingLED == 7) ? 0xFF : pgm_read_byte(&rainbowColors[7][2]);
+    
+    dmaPackage1[60] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][0]);
+    dmaPackage1[61] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][1]);
+    dmaPackage1[62] = (movingLED == 12) ? 0xFF : pgm_read_byte(&rainbowColors[12][2]);
+    
+    // button 18 R component only (index 17)
+    dmaPackage1[63] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][0]);
+    
+    // Package 2 RGB data
+    dmaPackage2[4] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][1]);
+    dmaPackage2[5] = (movingLED == 17) ? 0xFF : pgm_read_byte(&rainbowColors[17][2]);
+    
+    dmaPackage2[6] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][0]);
+    dmaPackage2[7] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][1]);
+    dmaPackage2[8] = (movingLED == 22) ? 0xFF : pgm_read_byte(&rainbowColors[22][2]);
+    
+    // buttons 4,9,14,19,24
+    dmaPackage2[9] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][0]);
+    dmaPackage2[10] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][1]);
+    dmaPackage2[11] = (movingLED == 3) ? 0xFF : pgm_read_byte(&rainbowColors[3][2]);
+    
+    dmaPackage2[12] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][0]);
+    dmaPackage2[13] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][1]);
+    dmaPackage2[14] = (movingLED == 8) ? 0xFF : pgm_read_byte(&rainbowColors[8][2]);
+    
+    dmaPackage2[15] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][0]);
+    dmaPackage2[16] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][1]);
+    dmaPackage2[17] = (movingLED == 13) ? 0xFF : pgm_read_byte(&rainbowColors[13][2]);
+    
+    dmaPackage2[18] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][0]);
+    dmaPackage2[19] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][1]);
+    dmaPackage2[20] = (movingLED == 18) ? 0xFF : pgm_read_byte(&rainbowColors[18][2]);
+    
+    dmaPackage2[21] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][0]);
+    dmaPackage2[22] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][1]);
+    dmaPackage2[23] = (movingLED == 23) ? 0xFF : pgm_read_byte(&rainbowColors[23][2]);
+    
+    // buttons 5,10,15,20
+    dmaPackage2[24] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][0]);
+    dmaPackage2[25] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][1]);
+    dmaPackage2[26] = (movingLED == 4) ? 0xFF : pgm_read_byte(&rainbowColors[4][2]);
+    
+    dmaPackage2[27] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][0]);
+    dmaPackage2[28] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][1]);
+    dmaPackage2[29] = (movingLED == 9) ? 0xFF : pgm_read_byte(&rainbowColors[9][2]);
+    
+    dmaPackage2[30] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][0]);
+    dmaPackage2[31] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][1]);
+    dmaPackage2[32] = (movingLED == 14) ? 0xFF : pgm_read_byte(&rainbowColors[14][2]);
+    
+    dmaPackage2[33] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][0]);
+    dmaPackage2[34] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][1]);
+    dmaPackage2[35] = (movingLED == 19) ? 0xFF : pgm_read_byte(&rainbowColors[19][2]);
+    
+    __enable_irq();
+}
+
+// SOF-aligned packet send - retry next SOF on NAK
 bool HIDSelector::sendPacket(uint8_t* packet) {
     uint8_t rcode = pUsb->outTransfer(bAddress, 0x04, 64, packet);
-    return (rcode == 0);
+    if (rcode == 0) return true;   // success
+    if (rcode == hrNAK) return false; // retry next SOF
+    // handle other errors if needed
+    return false;
 }
 
 // Non-blocking echo check
 bool HIDSelector::checkEcho() {
     uint8_t buffer[64];
     uint16_t bytesRead = 64;
-    uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
+    uint8_t rcode = pUsb->inTransfer(bAddress, 0x83, &bytesRead, buffer);
     if (rcode == 0 && bytesRead >= 3) {
         return true; // Simple echo check
     }
@@ -1154,6 +1235,33 @@ static int epPollSuccesses = 0;
 unsigned long consecutiveNAKFailures = 0;
 unsigned long lastSuccessfulCommand = 0;
 bool systemRecoveryMode = false;
+
+// Helper function to print binary representation
+void printBinary(uint8_t value) {
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((value >> i) & 1);
+    }
+}
+
+// Enhanced binary print with bit labels for IRQ register
+void printIRQBinary(uint8_t irq) {
+    Serial.print("IRQ: ");
+    printBinary(irq);
+    Serial.print(" (");
+    Serial.print(irq);
+    Serial.print(") Bits: ");
+    
+    if (irq & 0x80) Serial.print("B7 ");
+    if (irq & 0x40) Serial.print("FRAME ");
+    if (irq & 0x20) Serial.print("B5 ");
+    if (irq & 0x10) Serial.print("B4 ");
+    if (irq & 0x08) Serial.print("CONDET ");
+    if (irq & 0x04) Serial.print("B2 ");
+    if (irq & 0x02) Serial.print("B1 ");
+    if (irq & 0x01) Serial.print("OSCOK ");
+    
+    Serial.println();
+}
 
 // Animation cycle counter for status prints
 static int animationCycleCount = 0;
@@ -1206,7 +1314,7 @@ void loop()
         bool success = hidSelector.initializeInterface1();
         if (success) {
             // CRITICAL: Disable automatic polling that causes periodic flickering
-            hidSelector.disableAutomaticPolling();
+            //hidSelector.disableAutomaticPolling();
             
             animationStarted = true;
             Serial.println("🌈 Starting ultra-minimal RGB animation for MIDI looper...");
@@ -1271,10 +1379,18 @@ void loop()
         
         // Check if SOF happened
         uint8_t irq = Usb.regRd(rHIRQ);
+        // Serial.print(millis());
+        // Serial.print(" ");
+        // printBinary(irq);
+        // Serial.print(" (");
+        // Serial.print(irq);
+        // Serial.println(")");
+        
         if (irq & bmFRAMEIRQ) {
             // Clear FRAMEIRQ
             Usb.regWr(rHIRQ, bmFRAMEIRQ);
-            
+            // Serial.print("🎯 SOF Detected: ");
+            // printIRQBinary(irq);
             // Handle LED state machine on every SOF (non-blocking)
             hidSelector.handleLEDStateMachine();
         }
@@ -1285,7 +1401,7 @@ void loop()
     static elapsedMillis pollTimer;
     static bool pollingEnabled = false; // EP polling completely broken - 100% failure rate
     
-    if (pollingEnabled && pollTimer >= 50 && hidSelector.isReady()) { // Poll every 50ms
+    if (pollingEnabled && pollTimer >= 20 && hidSelector.isReady()) { // Poll every 50ms
         pollTimer = 0;
         
         uint8_t buf[64];
