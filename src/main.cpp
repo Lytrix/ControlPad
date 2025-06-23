@@ -42,9 +42,11 @@ private:
     // LED State Machine - SOF-aligned pacing
     enum LedState {
         LED_IDLE,
+        LED_SEND_CUSTOM_MODE,
         LED_SEND_PKG1,
         LED_SEND_PKG2,
         LED_SEND_CMD4180,
+        LED_SEND_WAIT_ONE_SOF,
         LED_SEND_ACTIVATE
     };
     
@@ -696,6 +698,7 @@ void HIDSelector::testLEDCommands() {
     
     // === USE DMA-PROTECTED BUFFERS INSTEAD OF STACK ===
     // Copy templates from PROGMEM to DMA-protected buffers
+    memcpy_P(dmaSetCustom, setCustomTemplate, 64);
     memcpy_P(dmaPackage1, package1Template, 64);
     memcpy_P(dmaPackage2, package2Template, 64);
     memcpy_P(dmaActivation, activationTemplate, 64);
@@ -959,64 +962,16 @@ void HIDSelector::handleLEDStateMachine() {
     }
     
     // This runs every SOF - spread packets across multiple SOF frames
-    const uint32_t LED_PERIOD = 20; // Try 31, 32, 33 to find sweet spot
+    const uint32_t LED_PERIOD = 40; // Try 31, 32, 33 to find sweet spot
 
     switch (ledState) {
-        case LED_IDLE:
-            // Echo transition analysis - track when echoes stop
-            static elapsedMicros echoTimer;
-            static elapsedMicros echoTimer2;
-            static uint32_t totalCycleCount = 0;
-            static bool echoesStillActive = true;
-            static uint32_t lastEchoAtCycle = 0;
-            static uint32_t lastKeepAliveTime = 0;
-            totalCycleCount++;
-
-            // if (echoTimer < 10000) {  // Poll for 10ms during idle (extended window)
-            //     if (echoTimer2 >= 64) {  // Every 64μs (higher frequency)
-            //         echoTimer2 = 0;
-                    
-            //         uint8_t buffer[64];
-            //         uint16_t bytesRead = 64;
-            //         uint8_t rcode = pUsb->inTransfer(bAddress, 0x03, &bytesRead, buffer);
-                    
-            //         if (rcode == 0 && bytesRead >= 2) {
-            //             // Check for ANY known echo pattern
-            //             if ((buffer[0] == 0x51 && buffer[1] == 0x28) ||  // Activation
-            //                 (buffer[0] == 0x41 && buffer[1] == 0x80) ||  // CMD4180
-            //                 (buffer[0] == 0x56 && buffer[1] == 0x83)) {  // Package echoes
-                            
-            //                 Serial.print("📡 CYCLE#"); 
-            //                 Serial.print(totalCycleCount);
-            //                 Serial.print(" Echo at T+"); 
-            //                 Serial.print(echoTimer); 
-            //                 Serial.print("μs: ");
-            //                 Serial.print(buffer[0], HEX);
-            //                 Serial.print(" ");
-            //                 Serial.print(buffer[1], HEX);
-            //                 Serial.print(" (bytes: ");
-            //                 for(int i = 0; i < min(8, (int)bytesRead); i++) {
-            //                     if(buffer[i] < 0x10) Serial.print("0");
-            //                     Serial.print(buffer[i], HEX);
-            //                     Serial.print(" ");
-            //                 }
-            //                 Serial.println(")");
-                            
-            //                 lastEchoAtCycle = totalCycleCount;
-            //                 echoesStillActive = true;
-            //             }
-            //         }
-            //     }
-            // } else {
-            //     echoTimer = 0; // Reset for next idle cycle
-                
-            //     // Check for echo silence transition
-            //     if (echoesStillActive && (totalCycleCount - lastEchoAtCycle) > 10) {
-            //         Serial.print("⚠️  ECHO SILENCE: No echoes for 10 cycles since cycle #");
-            //         Serial.println(lastEchoAtCycle);
-            //         echoesStillActive = false;
-            //     }
-            // }
+                case LED_IDLE:
+            // Send activation command every second SOF during idle
+            static uint32_t lastActivationSof = 0;
+            if ((sofCount - lastActivationSof) >= 2) {
+                lastActivationSof = sofCount;
+                sendPacket(dmaCmd4180);
+            }
             
             if ((sofCount - lastUpdateSof) >= LED_PERIOD) {
                 lastUpdateSof = sofCount;
@@ -1024,37 +979,49 @@ void HIDSelector::handleLEDStateMachine() {
                 // Prepare RGB data for current moving LED
                 prepareRGBData(movingLED);
                 
-                ledState = LED_SEND_PKG1;
+                ledState = LED_SEND_CUSTOM_MODE;
             }
             break;
 
+        case LED_SEND_CUSTOM_MODE:
+            if (sendPacket(dmaSetCustom)) {
+                ledState = LED_SEND_PKG1;
+              //  Serial.println("📦 PKG1: Sent - proceeding to PKG2 (SOF timing)");
+            }
+            break;
+            
         case LED_SEND_PKG1:
             if (sendPacket(dmaPackage1)) {
                 ledState = LED_SEND_PKG2;
-               //  Serial.println("📦 PKG1: Sent - proceeding to PKG2 (SOF timing)");
+               // Serial.println("📦 PKG1: Sent - proceeding to PKG2 (SOF timing)");
             }
             break;
-            
-
 
         case LED_SEND_PKG2:
-            if (sendPacket(dmaPackage2)) {
-                ledState = LED_SEND_ACTIVATE;
-                // Serial.println("📦 PKG2: Sent - proceeding to CMD4180 (SOF timing)");
+            if (sendPacket(dmaPackage2)) {        
+                ledState = LED_SEND_CMD4180;
+;
+              //  Serial.println("📦 PKG2: Sent - proceeding to CMD4180 (SOF timing)");
+            }
+       break;
+
+        case LED_SEND_CMD4180:
+            if (sendPacket(dmaCmd4180)) {
+                ledState = LED_SEND_WAIT_ONE_SOF;
+                commandCount++;
+                lastCommandTime = millis();
+                //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
             }
             break;
+
+               case LED_SEND_WAIT_ONE_SOF:
             
-
-
-        // case LED_SEND_CMD4180:
-        //     if (sendPacket(dmaCmd4180)) {
-        //         delayMicroseconds(10);
-        //         ledState = LED_SEND_ACTIVATE;
-        //         commandCount++;
-        //         lastCommandTime = millis();
-        //         Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
-        //     }
-        //     break;
+                ledState = LED_SEND_ACTIVATE;
+                commandCount++;
+                lastCommandTime = millis();
+                //Serial.println("✅ CMD4180: Sent - proceeding to activation (SOF timing)");
+            
+            break;
         case LED_SEND_ACTIVATE:
             if (sendPacket(dmaActivation)) {
                 ledState = LED_IDLE;
@@ -1062,7 +1029,7 @@ void HIDSelector::handleLEDStateMachine() {
                 lastCommandTime = millis();
                 
                 // Pure SOF timing - no hardware resets or nudges needed
-                // Serial.println("🎯 ACTIVATION: Sent - will check echo during next idle");
+                //Serial.println("🎯 ACTIVATION: Sent");
             }
             break;
     }
@@ -1392,6 +1359,7 @@ void loop()
             // Serial.print("🎯 SOF Detected: ");
             // printIRQBinary(irq);
             // Handle LED state machine on every SOF (non-blocking)
+            delayMicroseconds(100);
             hidSelector.handleLEDStateMachine();
         }
     }
@@ -1401,7 +1369,7 @@ void loop()
     static elapsedMillis pollTimer;
     static bool pollingEnabled = false; // EP polling completely broken - 100% failure rate
     
-    if (pollingEnabled && pollTimer >= 20 && hidSelector.isReady()) { // Poll every 50ms
+    if (pollingEnabled && pollTimer >= 50 && hidSelector.isReady()) { // Poll every 50ms
         pollTimer = 0;
         
         uint8_t buf[64];
