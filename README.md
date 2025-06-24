@@ -10,6 +10,7 @@ A **complete reverse-engineered USB host driver** for the **Cooler Master Contro
 
 ## 🎯 What This Project Achieves
 
+Similar to this repo: https://github.com/himdo/CoolerMasterControlPad-Driver
 This project provides a **fully functional reverse-engineered driver** for the Cooler Master ControlPad that:
 
 - ✅ **Individual LED control** for all 24 RGB buttons with complete color control
