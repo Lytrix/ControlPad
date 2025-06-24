@@ -1,5 +1,15 @@
 # Teensy ControlPad Driver
 
+In the end I did not use this driver for my midi looper, because I could not get the led brightness/flickering updates to stabilize enough. 
+The main problem is it requires 3x 64bits to be send every 40ms to update ALL leds with a very strict timing.
+
+I tried using an usb shield 2 host which does not have periodic cleanups like the imxrt does but only runs at 1ms max.
+ 
+After many clock timing tests, It still dims all leds every 5 seocnds after every 55 seconds which is really annoying, because the rest worked fine!
+
+The working code using the USB Shield with no the led dimmings using 40us updates can be found in this branch:
+https://github.com/Lytrix/ControlPad/tree/anti-flicker-solution
+
 A **complete reverse-engineered USB host driver** for the **Cooler Master ControlPad** running on **Teensy 4.1**, enabling full individual button LED control and detection without requiring the official software.
 
 ![controlpad](Images/button2_third_click.jpg)
